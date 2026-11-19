@@ -1,7 +1,7 @@
 {
   "fuente": "BANXICO_DOF_SF60653",
-  "actualizado": "2026-11-18T18:37:48Z",
-  "total": 2514,
+  "actualizado": "2026-11-19T14:41:00Z",
+  "total": 2515,
   "tasas": {
     "2020-01-01": 18.8727,
     "2020-01-02": 18.8727,
@@ -2516,7 +2516,8 @@
     "2026-11-15": 18.6188,
     "2026-11-16": 18.6188,
     "2026-11-17": 18.6188,
-    "2026-11-18": 18.5525
+    "2026-11-18": 18.5525,
+    "2026-11-19": 18.4677
   },
   "nota_otras_monedas": "Tipos de cambio cruzados con base en el tipo de cambio FIX publicado por el Banco de México y en los tipos de cambio promedio de mercado para el euro, yen japonés, libra esterlina y yuan chino frente al dólar que da a conocer diariamente el Fondo Monetario Internacional (FMI).",
   "monedas": {
