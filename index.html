@@ -10900,17 +10900,22 @@ function renderOpsCliente() {
     // de los ultimos seis meses, sin las ya reportadas en un aviso ni las
     // devueltas. En arrendamiento, solo los pagos que alcanzan 1,605 UMA entran
     // al acumulado semestral.
+    // Por contrato (Fr. XV) o inmueble (Fr. V), en los seis meses al dia de
+    // hoy; la barra muestra el de mayor acumulado.
     function acumUmbral(arr, frac){
-      var ahora = new Date(), hace6m = new Date(ahora.getFullYear(), ahora.getMonth() - 6, ahora.getDate());
-      var califARI = CFG_UMA.DIARIA * 1605, r = { total: 0, n: 0 };
+      var desde = fechaMenosMeses(hoy(), 6), califARI = CFG_UMA.DIARIA * 1605, g = {};
       arr.forEach(function(o){
         if (o.reportada === true || opExcluida(o)) return;
-        if (new Date(o.fecha_pago || o.fecha_registro || '2000-01-01') < hace6m) return;
+        var f = fechaOpUmbral(o);
+        if (f < desde || f > hoy()) return;
         var m = subtotalOpMXN(o);
         if (frac === 'ARI' && m < califARI) return;
-        r.total += m; r.n++;
+        var gr = grupoUmbral(o, frac, c), x = g[gr.id] || (g[gr.id] = { desc: gr.desc, total: 0, n: 0 });
+        x.total += m; x.n++;
       });
-      return r;
+      var grupos = Object.keys(g).map(function(k){ return g[k]; }).sort(function(a, b){ return b.total - a.total; });
+      var r = grupos[0] || { desc: '', total: 0, n: 0 };
+      return { total: r.total, n: r.n, desc: r.desc, grupos: grupos };
     }
     function umbralLabel(frac){
       var umas = frac==='ARI' ? CFG_UMA.UMBRAL_ARI : CFG_UMA.UMBRAL_INM;
@@ -10948,14 +10953,16 @@ function renderOpsCliente() {
 
       return '<div style="margin-bottom:6px">'
         +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">'
-        +'<span style="color:var(--tx2)">Acumulado 6 meses: <strong>$'+fmt2(acum.total)+'</strong> ('+acum.n+(acum.n===1?' operacion':' operaciones')+')</span>'
+        +'<span style="color:var(--tx2)">Acumulado 6 meses'+(acum.desc ? ' ('+capEsc(acum.desc)+')' : '')+': <strong>$'+fmt2(acum.total)+'</strong> ('+acum.n+(acum.n===1?' operacion':' operaciones')+')</span>'
         +'<span style="color:var(--tx3)">Umbral: '+umbralLabel(frac)+'</span>'
         +'</div>'
         +'<div style="height:8px;background:var(--brd);border-radius:4px;overflow:hidden;margin-bottom:4px">'
         +'<div style="height:100%;width:'+pct+'%;background:'+barCol+';border-radius:4px;transition:width .4s"></div>'
         +'</div>'
-        +'<div style="font-size:11px;color:var(--tx3);margin-bottom:10px">Lo que cuentan los umbrales: subtotales en pesos de los ultimos seis meses, sin operaciones ya reportadas en un aviso ni devueltas'
-        +(frac==='ARI' ? '; en arrendamiento, solo los pagos de 1,605 UMA o mas.' : '.')+'</div>'
+        +'<div style="font-size:11px;color:var(--tx3);margin-bottom:10px">Lo que cuentan los umbrales: subtotales en pesos de los seis meses al dia de hoy, por '+(frac==='ARI' ? 'contrato' : 'inmueble')+', sin operaciones ya reportadas en un aviso, devueltas ni rechazadas'
+        +(frac==='ARI' ? '; solo los pagos de 1,605 UMA o mas.' : '.')
+        +(acum.grupos.length > 1 ? ' Otros: ' + acum.grupos.slice(1).map(function(x){ return capEsc(x.desc) + ' $' + fmt2(x.total); }).join(' · ') + '.' : '')
+        +' Cada pago se revisa ademas contra los seis meses anteriores a su propia fecha.</div>'
         +'</div>'
         +'<div class="twrap"><table>'
         +'<thead><tr><th>Fecha pago</th><th>Forma pago</th><th>Moneda</th><th>Pago</th><th style="text-align:right">Subtotal (MXN)</th><th>Estado</th></tr></thead>'
@@ -11666,6 +11673,8 @@ function marcarOpsReportadasDeAlerta(alerta, folio) {
           o.nombre_cliente.trim().toLowerCase() === alerta.nombre_cliente.trim().toLowerCase()) mismoCliente = true;
 
       var mismaFrac = (o.fraccion || 'INM') === fraccion;
+      // Alerta con la ventana guardada: exactamente las operaciones que sumaron.
+      if (alerta.ops_umbral && alerta.ops_umbral.length) return mismoCliente && alerta.ops_umbral.indexOf(String(o.id)) >= 0;
       var fechaOp   = new Date(o.fecha_pago || o.fecha_registro || '2000-01-01');
       return mismoCliente && mismaFrac && fechaOp >= hace6m;
     });
@@ -11912,8 +11921,11 @@ function crearAvisoDesdeAlerta(alertaId) {
         var mismoCliente = (cli && o.id_cliente_ref===cli.id) ||
                            (a.num_cliente && String(o.num_cliente)===String(a.num_cliente));
         var mismafrac = (o.fraccion||'INM')===fraccion;
+        if (o.reportada === true || opExcluida(o)) return false;
+        // Alerta con la ventana guardada: exactamente las operaciones que sumaron.
+        if (a.ops_umbral && a.ops_umbral.length) return mismoCliente && a.ops_umbral.indexOf(String(o.id)) >= 0;
         var fechaOp = new Date(o.fecha_pago || '2000-01-01');
-        return mismoCliente && mismafrac && fechaOp >= hace6m && !opExcluida(o);
+        return mismoCliente && mismafrac && fechaOp >= hace6m;
       });
 
       // Guardar IDs de las ops que se incluirán en este aviso para marcarlas al guardar
@@ -14466,247 +14478,158 @@ function nuevaLiqForm(datos) {
 }
 
 // ── MOTOR DE DETECCIÓN DE UMBRALES ───────────────────────────
+// Art. 19 de las Reglas: la acumulacion es en periodos de hasta seis meses.
+// Cada pago revisa los seis meses ANTERIORES A SU FECHA DE PAGO (no a la de
+// captura), con las operaciones del mismo contrato (Fr. XV) o del mismo
+// inmueble (Fr. V) del cliente. Un pago capturado con fecha atrasada tambien
+// cae en la ventana de los pagos posteriores de los seis meses siguientes, asi
+// que esas ventanas se revisan de nuevo (decisiones del oficial de
+// cumplimiento, 19 nov 2026). La regla de Fr. V (una operacion de 8,025 UMA o
+// mas alerta sola; acumulado de seis meses; aviso al 70 %) y la de Fr. XV
+// (solo pagos de 1,605 UMA o mas) no cambian.
 // nuevaMonto es el subtotal EN PESOS de la operacion nueva (subtotal_mxn);
-// opNueva, si se pasa, es la operacion, para citar su moneda original.
+// opNueva es la operacion (contrato o inmueble y moneda original).
+function fechaMenosMeses(f, meses) {
+  var d = new Date(String(f || hoy()).substring(0, 10) + 'T12:00:00');
+  if (isNaN(d.getTime())) d = new Date();
+  d.setMonth(d.getMonth() - meses);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+function fechaOpUmbral(o) { return String(o.fecha_pago || o.fecha_registro || '2000-01-01').substring(0, 10); }
+// Contrato (arrendamiento) o inmueble (compraventa) de la operacion. Las
+// operaciones anteriores sin inmueble cuentan en el primero del cliente.
+function grupoUmbral(o, fraccion, cli) {
+  if (fraccion === 'ARI') return { id: 'C:' + String(o.contrato_id || ''), desc: o.contrato_desc ? 'contrato ' + o.contrato_desc : 'sin contrato registrado' };
+  var inm0 = cli ? (inmueblesDe(cli)[0] || {}) : {};
+  var id = String(o.inmueble_id || inm0.id || '');
+  return { id: 'I:' + id, desc: o.inmueble_desc ? 'inmueble ' + o.inmueble_desc : (inm0.id && !o.inmueble_id ? 'inmueble ' + textoInmueble(inm0) : 'sin inmueble registrado') };
+}
 function verificarUmbralesCliente(idCli, nomCli, numCli, fraccion, nuevaMonto, nuevaFecha, idNuevoItem, cb, opNueva) {
   var uma = CFG_UMA.DIARIA;
   var esARI = fraccion === 'ARI';
   nuevaMonto = parseFloat(nuevaMonto) || 0;
+  opNueva = opNueva || {};
+  var cli = null; (App.clientes || []).forEach(function(c){ if (String(c.id) === String(idCli)) cli = c; });
+  var grupo = grupoUmbral(opNueva, fraccion, cli);
+  var fNueva = String(nuevaFecha || hoy()).substring(0, 10);
   var nuevaExt = esMonedaExtranjera(opNueva);
   var origNueva = nuevaExt
     ? ' (' + fmtMonedaOrig(opNueva.subtotal !== undefined ? opNueva.subtotal : opNueva.monto, opNueva.moneda)
       + (parseFloat(opNueva.tipo_cambio_aplicado) > 0 ? ' al tipo de cambio ' + opNueva.tipo_cambio_aplicado + (opNueva.tc_fecha ? ' del ' + opNueva.tc_fecha : '') : '') + ')'
     : '';
   var NOTA_MXN = ' Montos en pesos: el subtotal de cada operacion en moneda extranjera se convierte con el tipo de cambio de su fecha.';
+  var base = { nombre_cliente: nomCli || 'Sin nombre', num_cliente: numCli, id_cliente_ref: idCli, fraccion: fraccion,
+               grupo_id: grupo.id, grupo_desc: grupo.desc, estatus_atencion: 'Pendiente' };
 
   // Umbrales
-  var UMBRAL_MENSUAL_ARI  = uma * 1605;   // Fr. XV — filtro mensual
-  var UMBRAL_SEMESTRAL_ARI = uma * 3210;  // Fr. XV — acumulado semestral
-  var UMBRAL_INM           = uma * 8025;  // Fr. V  — acumulado semestral directo
+  var UMBRAL_MENSUAL_ARI  = uma * 1605;   // Fr. XV — un pago califica desde aqui
+  var UMBRAL_SEMESTRAL_ARI = uma * 3210;  // Fr. XV — acumulado semestral y mensual directo
+  var UMBRAL_INM           = uma * 8025;  // Fr. V  — individual y acumulado semestral
 
-  var umbralAplicable = esARI ? UMBRAL_SEMESTRAL_ARI : UMBRAL_INM;
-
-  console.log('[UMBRAL] Verificando:', {
-    cliente: nomCli||idCli, fraccion: fraccion,
-    monto: nuevaMonto, uma: uma,
-    umbral_mensual_ari: esARI ? UMBRAL_MENSUAL_ARI : 'N/A',
-    umbral_semestral: umbralAplicable
-  });
-
-  // ── VERIFICACIÓN INDIVIDUAL ────────────────────────────────
-  // Para Fr. V: si la operación individual supera el umbral semestral → alerta directa
-  // Para Fr. XV: si la operación individual supera el umbral mensual → puede contribuir
-  //             si supera el semestral directamente → alerta directa
-  var umbralIndividual = esARI ? UMBRAL_MENSUAL_ARI : UMBRAL_INM;
-  if (!esARI && nuevaMonto >= umbralAplicable) {
-    console.log('[UMBRAL] ALERTA INDIVIDUAL Fr.V');
-    crearAlertaUmbral({
-      nombre_cliente: nomCli||'Sin nombre', num_cliente: numCli,
-      id_cliente_ref: idCli, fraccion: fraccion,
+  // ── VERIFICACIÓN INDIVIDUAL (Fr. V) ────────────────────────
+  if (!esARI && nuevaMonto >= UMBRAL_INM) {
+    crearAlertaUmbral(Object.assign({}, base, {
       tipo: 'Umbral individual', nivel: 'Alto',
-      descripcion: 'Operacion individual de $' + nuevaMonto.toLocaleString('es-MX') + ' MXN' + origNueva
-        + ' supera umbral de $' + umbralAplicable.toLocaleString('es-MX')
+      descripcion: 'Operacion individual del ' + fNueva + ' de $' + nuevaMonto.toLocaleString('es-MX') + ' MXN' + origNueva
+        + ' (' + grupo.desc + ') supera umbral de $' + UMBRAL_INM.toLocaleString('es-MX')
         + ' (' + CFG_UMA.UMBRAL_INM.toLocaleString() + ' UMAs Fr.V)',
-      monto_acumulado: nuevaMonto, monto_umbral: umbralAplicable,
-      num_operaciones: 1, estatus_atencion: 'Pendiente'
-    });
+      monto_acumulado: nuevaMonto, monto_umbral: UMBRAL_INM, num_operaciones: 1,
+      ops_umbral: idNuevoItem ? [String(idNuevoItem)] : [], ventana_desde: fNueva, ventana_hasta: fNueva
+    }));
     toast('ALERTA UMBRAL Fr.V: $' + nuevaMonto.toLocaleString('es-MX'), 'w');
     if (cb) cb();
     return;
   }
+  if (!idCli && !numCli && !nomCli) { if (cb) cb(); return; }
 
-  // Sin identificador de cliente no podemos calcular acumulado
-  if (!idCli && !numCli && !nomCli) {
-    console.log('[UMBRAL] Sin identificador, omitiendo acumulado');
-    if (cb) cb();
-    return;
-  }
-
-  // ── CONSULTAR HISTORIAL ────────────────────────────────────
+  // ── HISTORIAL DEL MISMO CONTRATO O INMUEBLE ────────────────
   spGet('PLD_Ops_Liq', function(todas) {
-    var ahora  = new Date();
-    var hace6m = new Date(ahora.getFullYear(), ahora.getMonth() - 6, ahora.getDate());
-
-    // Filtrar ops del mismo cliente y fracción en 6 meses, excluyendo la recién guardada
-    var opsCliente = todas.filter(function(o) {
-      if (idNuevoItem && String(o.id) === String(idNuevoItem)) return false; // excluir la nueva
-      if (o.reportada === true) return false; // excluir ops ya reportadas en un aviso
-      if (opExcluida(o)) return false;          // recursos devueltos: no acumula
-
-      var mismoCliente = false;
-      if (idCli  && o.id_cliente_ref === idCli)   mismoCliente = true;
-      if (numCli && String(o.num_cliente) === String(numCli)) mismoCliente = true;
-      if (!mismoCliente && nomCli && o.nombre_cliente &&
-          o.nombre_cliente.trim().toLowerCase() === nomCli.trim().toLowerCase())
-        mismoCliente = true;
-
-      var mismafrac = (o.fraccion || 'INM') === fraccion;
-      var fechaOp   = new Date(o.fecha_pago || o.fecha_registro || '2000-01-01');
-      return mismoCliente && mismafrac && fechaOp >= hace6m;
+    var delGrupo = (todas || []).filter(function(o) {
+      if (idNuevoItem && String(o.id) === String(idNuevoItem)) return false;   // se agrega abajo
+      if (o.reportada === true || opExcluida(o)) return false;                 // ya reportada, devuelta o rechazada
+      var mismoCliente = (idCli && o.id_cliente_ref === idCli) || (numCli && String(o.num_cliente) === String(numCli))
+        || (!idCli && !numCli && nomCli && o.nombre_cliente && o.nombre_cliente.trim().toLowerCase() === nomCli.trim().toLowerCase());
+      return mismoCliente && (o.fraccion || 'INM') === fraccion && grupoUmbral(o, fraccion, cli).id === grupo.id;
     });
-
-    // Incluir la nueva operación en el análisis
-    var todasConNueva = opsCliente.concat([{
-      fecha_pago: nuevaFecha || hoy(),
-      monto: nuevaMonto,
-      subtotal_mxn: nuevaMonto,
-      fraccion: fraccion,
-      id: idNuevoItem || 'nueva'
-    }]);
-    // Si alguna operacion de la ventana esta en moneda extranjera, la alerta
-    // aclara que los montos se convirtieron a pesos.
-    var notaMXN = (nuevaExt || opsCliente.some(esMonedaExtranjera)) ? NOTA_MXN : '';
+    var nueva = { id: String(idNuevoItem || 'nueva'), fecha_pago: fNueva, monto: nuevaMonto, subtotal_mxn: nuevaMonto, fraccion: fraccion, moneda: opNueva.moneda };
+    var ops = delGrupo.concat(nuevaMonto > 0 ? [nueva] : []);
+    var notaMXN = (nuevaExt || delGrupo.some(esMonedaExtranjera)) ? NOTA_MXN : '';
+    // Ventana de un pago: los seis meses anteriores a su fecha, incluida.
+    var ventana = function(f){ var d = fechaMenosMeses(f, 6); return ops.filter(function(o){ var x = fechaOpUmbral(o); return x >= d && x <= f; }); };
+    // Fechas a revisar: la del pago nuevo y las de los pagos posteriores de los
+    // seis meses siguientes (su ventana ahora incluye al pago nuevo).
+    var hasta6 = fechaMenosMeses(fNueva, -6), anclas = [fNueva];
+    delGrupo.forEach(function(o){ var x = fechaOpUmbral(o); if (x > fNueva && x <= hasta6 && anclas.indexOf(x) < 0) anclas.push(x); });
+    anclas.sort();
+    var ids = function(l){ return l.map(function(o){ return String(o.id); }).filter(function(x){ return x !== 'nueva'; }); };
 
     if (esARI) {
-      // ── LÓGICA Fr. XV (CORREGIDA): DOS NIVELES ─────────────────────────
-      // Mensual directo : mes con operaciones que individual o agregadas ≥ 3,210 UMAs → alerta
-      // Semestral       : meses cuyos totales ≥ 1,605 UMAs califican;
-      //                   si su suma en 6 meses ≥ 3,210 UMAs → alerta semestral
-      // Reset semestral : operaciones reportadas en avisos se excluyen (ya filtrado arriba)
-
-      var UMA_DIRECTO_ARI    = uma * 3210;  // umbral de alerta mensual directa
-      var UMA_CALIFICA_ARI   = uma * 1605;  // umbral para que un mes califique al semestral
-      var UMA_SEMESTRAL_ARI  = uma * 3210;  // umbral de alerta semestral acumulada
-
-      // Paso 1: Agrupar por mes calendario. `total`/`ops` cuentan todos los
-      // pagos del mes (los usa la alerta mensual directa); `calif`/`opsCalif`
-      // solo los pagos que individualmente alcanzan 1,605 UMA, que son los
-      // unicos que entran a la acumulacion semestral (Paso 3).
-      var porMes = {};
-      todasConNueva.forEach(function(o) {
-        var key   = mesDe(o.fecha_pago || o.fecha_registro || hoy());
-        var monto = subtotalOpMXN(o);
-        if (!porMes[key]) porMes[key] = { total: 0, ops: 0, calif: 0, opsCalif: 0 };
-        porMes[key].total += monto;
-        porMes[key].ops++;
-        if (monto >= UMA_CALIFICA_ARI) { porMes[key].calif += monto; porMes[key].opsCalif++; }
-      });
-
-      console.log('[UMBRAL ARI] Resumen por mes:', JSON.stringify(porMes));
-
-      // Mes de la OPERACION, no el calendario de hoy: Paso 1 ya la agrupo ahi, y
-      // una operacion capturada con fecha de otro mes debe evaluarse en el suyo.
-      var mesActual = mesDe(nuevaFecha || hoy());
-      var mesOp     = porMes[mesActual] || { total: 0, ops: 0, calif: 0, opsCalif: 0 };
-
-      // Paso 2: Alerta mensual directa. Solo cuentan los pagos del mes que
-      // individualmente alcanzan 1,605 UMA (regla del Oficial de Cumplimiento):
-      //   - un pago >= 3,210 UMA dispara solo;
-      //   - dos o mas pagos >= 1,605 UMA disparan cuando su suma llega a 3,210;
-      //   - pagos < 1,605 UMA no cuentan, ni solos ni combinados con uno que si.
-      // Se entra siempre que la suma calificada supere el umbral (la alerta
-      // abierta se refresca); el aviso emergente solo en el cruce.
-      var califMesActual = mesOp.calif;
-      var califMesAntes  = califMesActual - (nuevaMonto >= UMA_CALIFICA_ARI ? nuevaMonto : 0);
-      if (califMesActual >= UMA_DIRECTO_ARI) {
-        var cruzaMes = califMesAntes < UMA_DIRECTO_ARI;
-        console.log('[UMBRAL ARI]', cruzaMes ? 'ALERTA MENSUAL DIRECTA' : 'mes sigue sobre 3,210 UMA: se refresca la alerta mensual',
-          '| pagos >= 1,605 UMA en ' + mesActual + ': $' + califMesActual.toLocaleString('es-MX')
-          + ' (' + mesOp.opsCalif + ' de ' + mesOp.ops + ' pagos)');
-        crearAlertaUmbral({
-          nombre_cliente: nomCli||'Sin nombre', num_cliente: numCli,
-          id_cliente_ref: idCli, fraccion: 'ARI',
+      // Solo los pagos que individualmente alcanzan 1,605 UMA entran a la
+      // acumulacion semestral y a la mensual directa.
+      var califica = function(o){ return subtotalOpMXN(o) >= UMBRAL_MENSUAL_ARI; };
+      var nuevaCalifica = nuevaMonto >= UMBRAL_MENSUAL_ARI;
+      // Mensual directa: mes de la operacion, no el de hoy.
+      var mesNueva = mesDe(fNueva);
+      var delMes = ops.filter(function(o){ return mesDe(fechaOpUmbral(o)) === mesNueva; });
+      var califMes = delMes.filter(califica), sumMes = califMes.reduce(function(s, o){ return s + subtotalOpMXN(o); }, 0);
+      if (sumMes >= UMBRAL_SEMESTRAL_ARI) {
+        var cruzaMes = (sumMes - (nuevaCalifica ? nuevaMonto : 0)) < UMBRAL_SEMESTRAL_ARI;
+        crearAlertaUmbral(Object.assign({}, base, {
           tipo: 'Umbral mensual directo Fr.XV', nivel: 'Alto',
-          descripcion: 'Pagos que alcanzan 1,605 UMA en ' + mesActual + ' suman $' + califMesActual.toLocaleString('es-MX')
-            + ' y superan el umbral mensual de $' + UMA_DIRECTO_ARI.toLocaleString('es-MX')
-            + ' (3,210 UMAs Fr.XV); ' + mesOp.opsCalif + ' de ' + mesOp.ops + ' pagos del mes.' + notaMXN,
-          monto_acumulado: califMesActual, monto_umbral: UMA_DIRECTO_ARI,
-          num_operaciones: mesOp.opsCalif, estatus_atencion: 'Pendiente'
-        });
-        if (cruzaMes) toast('ALERTA UMBRAL MENSUAL Fr.XV: $' + califMesActual.toLocaleString('es-MX'), 'w');
+          descripcion: 'Pagos que alcanzan 1,605 UMA en ' + mesNueva + ' (' + grupo.desc + ') suman $' + sumMes.toLocaleString('es-MX')
+            + ' y superan el umbral mensual de $' + UMBRAL_SEMESTRAL_ARI.toLocaleString('es-MX')
+            + ' (3,210 UMAs Fr.XV); ' + califMes.length + ' de ' + delMes.length + ' pagos del mes.' + notaMXN,
+          monto_acumulado: sumMes, monto_umbral: UMBRAL_SEMESTRAL_ARI, num_operaciones: califMes.length,
+          ops_umbral: ids(califMes), ventana_desde: mesNueva + '-01', ventana_hasta: fNueva
+        }));
+        if (cruzaMes) toast('ALERTA UMBRAL MENSUAL Fr.XV: $' + sumMes.toLocaleString('es-MX'), 'w');
       }
-
-      // Paso 3: Acumulado semestral — solo los pagos que individualmente alcanzan
-      // 1,605 UMA (umbral de identificacion). Un mes califica si tiene al menos
-      // uno, y aporta unicamente la suma de esos pagos, no su total.
-      var mesesQueCalifican = [];
-      var acumSemestral = 0;
-      Object.keys(porMes).forEach(function(mes) {
-        var m = porMes[mes];
-        if (m.opsCalif > 0) {
-          mesesQueCalifican.push({ mes: mes, total: m.calif, ops: m.opsCalif });
-          acumSemestral += m.calif;
-          console.log('[UMBRAL ARI] Mes', mes, 'califica para semestral: $' + m.calif.toLocaleString('es-MX'),
-            '(' + m.opsCalif + ' de ' + m.ops + ' pagos alcanzan 1,605 UMA; total del mes $' + m.total.toLocaleString('es-MX') + ')');
-        } else {
-          console.log('[UMBRAL ARI] Mes', mes, 'no califica: ningun pago alcanza 1,605 UMA (total del mes $' + m.total.toLocaleString('es-MX') + ')');
-        }
+      // Semestral: la ventana con mayor acumulado entre el pago nuevo y los posteriores.
+      var mejor = null;
+      anclas.forEach(function(f){
+        var l = ventana(f).filter(califica), s = l.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
+        if (!mejor || s > mejor.suma) mejor = { f: f, ops: l, suma: s };
       });
-
-      console.log('[UMBRAL ARI] Acum semestral calificado: $' + acumSemestral.toLocaleString('es-MX'),
-        '| Umbral: $' + UMA_SEMESTRAL_ARI.toLocaleString('es-MX'));
-
-      // Solo crear alerta si esta operación es la que cruzó el semestral
-      // m.total ya es la suma de pagos calificados; el pago nuevo se descuenta
-      // solo si el mismo alcanza 1,605 UMA (si no, nunca entro a la suma).
-      var acumSemestralPrev = 0;
-      mesesQueCalifican.forEach(function(m) {
-        var descontar = (m.mes === mesActual && nuevaMonto >= UMA_CALIFICA_ARI) ? nuevaMonto : 0;
-        acumSemestralPrev += Math.max(0, m.total - descontar);
-      });
-
-      // Mientras el acumulado supere el umbral se entra SIEMPRE: crearAlertaUmbral
-      // deduplica (actualiza la alerta abierta del cliente+fraccion o crea una si
-      // no hay), asi que el monto a reportar se mantiene al dia. Antes solo se
-      // entraba en la operacion que cruzaba, y la alerta se quedaba con el
-      // acumulado de ese momento. El aviso emergente se conserva solo en el cruce.
-      if (acumSemestral >= UMA_SEMESTRAL_ARI) {
-        var cruza = acumSemestralPrev < UMA_SEMESTRAL_ARI;
-        console.log('[UMBRAL ARI]', cruza ? 'ALERTA SEMESTRAL' : 'sigue sobre el umbral: se refresca la alerta abierta');
-        var descMeses = mesesQueCalifican.map(function(m){
-          return m.mes + ' ($' + m.total.toLocaleString('es-MX') + ', ' + m.ops + (m.ops === 1 ? ' pago' : ' pagos') + ')';
-        }).join(', ');
-        var opsCalificadas = mesesQueCalifican.reduce(function(s, m){ return s + m.ops; }, 0);
-        crearAlertaUmbral({
-          nombre_cliente: nomCli||'Sin nombre', num_cliente: numCli,
-          id_cliente_ref: idCli, fraccion: 'ARI',
+      if (mejor && mejor.suma >= UMBRAL_SEMESTRAL_ARI) {
+        var conNueva = mejor.ops.some(function(o){ return o.id === nueva.id; });
+        var cruza = conNueva && (mejor.suma - (nuevaCalifica ? nuevaMonto : 0)) < UMBRAL_SEMESTRAL_ARI;
+        var meses = {};
+        mejor.ops.forEach(function(o){ var m = mesDe(fechaOpUmbral(o)); meses[m] = meses[m] || { t: 0, n: 0 }; meses[m].t += subtotalOpMXN(o); meses[m].n++; });
+        var descMeses = Object.keys(meses).sort().map(function(m){ return m + ' ($' + meses[m].t.toLocaleString('es-MX') + ', ' + meses[m].n + (meses[m].n === 1 ? ' pago' : ' pagos') + ')'; }).join(', ');
+        crearAlertaUmbral(Object.assign({}, base, {
           tipo: 'Umbral acumulado semestral Fr.XV', nivel: 'Alto',
-          descripcion: 'Acumulado semestral de $' + acumSemestral.toLocaleString('es-MX')
-            + ' supera umbral de $' + UMA_SEMESTRAL_ARI.toLocaleString('es-MX')
+          descripcion: 'Acumulado de los seis meses al ' + mejor.f + ' (' + grupo.desc + ') de $' + mejor.suma.toLocaleString('es-MX')
+            + ' supera umbral de $' + UMBRAL_SEMESTRAL_ARI.toLocaleString('es-MX')
             + ' (3,210 UMAs). Solo pagos que alcanzan 1,605 UMA, por mes: ' + descMeses + '.' + notaMXN,
-          monto_acumulado: acumSemestral, monto_umbral: UMA_SEMESTRAL_ARI,
-          num_operaciones: opsCalificadas,
-          meses_califican: mesesQueCalifican.length,
-          estatus_atencion: 'Pendiente'
-        });
-        if (cruza) toast('ALERTA UMBRAL SEMESTRAL Fr.XV: $' + acumSemestral.toLocaleString('es-MX')
-          + ' en ' + mesesQueCalifican.length + ' meses calificados', 'w');
+          monto_acumulado: mejor.suma, monto_umbral: UMBRAL_SEMESTRAL_ARI, num_operaciones: mejor.ops.length,
+          meses_califican: Object.keys(meses).length, ops_umbral: ids(mejor.ops), ventana_desde: fechaMenosMeses(mejor.f, 6), ventana_hasta: mejor.f
+        }));
+        if (cruza || (!conNueva && mejor.f !== fNueva)) toast('ALERTA UMBRAL SEMESTRAL Fr.XV: $' + mejor.suma.toLocaleString('es-MX') + ' al ' + mejor.f + ' (' + grupo.desc + ')', 'w');
       }
-
     } else {
-      // ── LÓGICA Fr. V: ACUMULADO DIRECTO 6 MESES ──────────
-
-      var acumuladoPrev = opsCliente.reduce(function(s,o){ return s + subtotalOpMXN(o); }, 0);
-      var acumConNueva  = acumuladoPrev + nuevaMonto;
-
-      console.log('[UMBRAL INM] Acum prev:', acumuladoPrev,
-        '+ nueva:', nuevaMonto, '= total:', acumConNueva,
-        '| umbral:', UMBRAL_INM);
-
-      // Misma regla que en Fr. XV: se entra siempre que el acumulado supere el
-      // umbral; crearAlertaUmbral actualiza la alerta abierta o crea una.
-      if (acumConNueva >= UMBRAL_INM) {
-        var cruza = acumuladoPrev < UMBRAL_INM;
-        console.log('[UMBRAL INM]', cruza ? 'ALERTA ACUMULADO' : 'sigue sobre el umbral: se refresca la alerta abierta');
-        crearAlertaUmbral({
-          nombre_cliente: nomCli||'Sin nombre', num_cliente: numCli,
-          id_cliente_ref: idCli, fraccion: 'INM',
+      // ── Fr. V: acumulado de seis meses ──
+      var mejorV = null;
+      anclas.forEach(function(f){
+        var l = ventana(f), s = l.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
+        if (!mejorV || s > mejorV.suma) mejorV = { f: f, ops: l, suma: s };
+      });
+      var propia = ventana(fNueva), sumPropia = propia.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
+      if (mejorV && mejorV.suma >= UMBRAL_INM) {
+        var cruzaV = mejorV.f === fNueva ? (mejorV.suma - nuevaMonto) < UMBRAL_INM : true;
+        crearAlertaUmbral(Object.assign({}, base, {
           tipo: 'Umbral acumulado 6 meses Fr.V', nivel: 'Alto',
-          descripcion: 'Acumulado 6 meses de $' + acumConNueva.toLocaleString('es-MX')
-            + ' supera umbral de $' + UMBRAL_INM.toLocaleString('es-MX')
-            + ' (8,025 UMAs Fr.V).' + notaMXN,
-          monto_acumulado: acumConNueva, monto_umbral: UMBRAL_INM,
-          num_operaciones: opsCliente.length + 1, estatus_atencion: 'Pendiente'
-        });
-        if (cruza) toast('ALERTA UMBRAL Fr.V: acumulado $' + acumConNueva.toLocaleString('es-MX'), 'w');
-      } else if (acumConNueva < UMBRAL_INM) {
-        var pct = Math.round(acumConNueva / UMBRAL_INM * 100);
-        if (pct >= 70) {
-          toast('Aviso Fr.V: acumulado al ' + pct + '% del umbral ($' + acumConNueva.toLocaleString('es-MX') + ')', 'w');
-        }
+          descripcion: 'Acumulado de los seis meses al ' + mejorV.f + ' (' + grupo.desc + ') de $' + mejorV.suma.toLocaleString('es-MX')
+            + ' supera umbral de $' + UMBRAL_INM.toLocaleString('es-MX') + ' (8,025 UMAs Fr.V); '
+            + mejorV.ops.length + (mejorV.ops.length === 1 ? ' operacion' : ' operaciones') + '.' + notaMXN,
+          monto_acumulado: mejorV.suma, monto_umbral: UMBRAL_INM, num_operaciones: mejorV.ops.length,
+          ops_umbral: ids(mejorV.ops), ventana_desde: fechaMenosMeses(mejorV.f, 6), ventana_hasta: mejorV.f
+        }));
+        if (cruzaV) toast('ALERTA UMBRAL Fr.V: acumulado $' + mejorV.suma.toLocaleString('es-MX') + ' al ' + mejorV.f + ' (' + grupo.desc + ')', 'w');
+      } else {
+        var pct = Math.round(sumPropia / UMBRAL_INM * 100);
+        if (pct >= 70) toast('Aviso Fr.V: acumulado al ' + pct + '% del umbral ($' + sumPropia.toLocaleString('es-MX') + ', ' + grupo.desc + ')', 'w');
       }
     }
-
     if (cb) cb();
   });
 }
@@ -15688,7 +15611,9 @@ function crearAlertaUmbral(datos) {
       // propia alerta abierta. Antes cualquiera sobreescribia a cualquiera, y
       // con el refresco en cada operacion se pisaban en orden aleatorio.
       var mismoTipo = (a.tipo || '') === (datos.tipo || '');
-      if (mismoCliente && mismaFrac && estaAbierta && mismoTipo) alertaExistente = a;
+      // Una alerta abierta por contrato (Fr. XV) o inmueble (Fr. V).
+      var mismoGrupo = String(a.grupo_id || '') === String(datos.grupo_id || '');
+      if (mismoCliente && mismaFrac && estaAbierta && mismoTipo && mismoGrupo) alertaExistente = a;
     });
 
     if (alertaExistente) {
@@ -15699,6 +15624,7 @@ function crearAlertaUmbral(datos) {
       alertaExistente.descripcion      = datos.descripcion;
       alertaExistente.fecha_actualizacion = hoy();
       if (datos.meses_califican !== undefined) alertaExistente.meses_califican = datos.meses_califican;
+      ['grupo_id', 'grupo_desc', 'ops_umbral', 'ventana_desde', 'ventana_hasta'].forEach(function(k){ if (datos[k] !== undefined) alertaExistente[k] = datos[k]; });
       spUpdate('PLD_Alertas', alertaExistente.id, alertaExistente, function() {
         console.log('[UMBRAL] Alerta existente actualizada, id:', alertaExistente.id,
           '| nuevo acumulado:', datos.monto_acumulado);
@@ -15728,6 +15654,7 @@ function crearAlertaUmbral(datos) {
         entidad_nombre: App.entidadActual ? App.entidadActual.nombre : ''
       };
       if (datos.meses_califican !== undefined) alerta.meses_califican = datos.meses_califican;
+      ['grupo_id', 'grupo_desc', 'ops_umbral', 'ventana_desde', 'ventana_hasta'].forEach(function(k){ if (datos[k] !== undefined) alerta[k] = datos[k]; });
       spCreate('PLD_Alertas', alerta, null);
       console.log('[UMBRAL] Nueva alerta de umbral creada para', datos.nombre_cliente, '| fraccion:', datos.fraccion);
     }
