@@ -1813,6 +1813,8 @@ function iniciarApp() {
         try { autoSyncPEPManager(); } catch(e){ console.warn('[PEPM] auto-sync', e); }
         // Screening diario de los clientes de arrendamiento, en segundo plano.
         try { iniciarScrMasivoDiario(); } catch(e){ console.warn('[SCR] diario', e); }
+        // Sin la lista del historial no se guardan los cambios de nivel (art. 41 fr. IV).
+        if (!App.listas[LISTA_HIST] && App.rol === 'admin') setTimeout(function(){ avisoFaltaHistorial(); }, 3000);
       });
       }); // cargarRolUsuario
     });
@@ -8422,7 +8424,7 @@ function cambiosPerfilTx(antes, despues) {
 // null en el alta); actual: el expediente ya guardado. extra: datos del evento
 // (ciclo de revaloracion, justificacion, coincidencia resuelta).
 function registrarHistorialRiesgo(origen, anterior, actual, extra) {
-  if (!App.listas[LISTA_HIST]) { console.warn('[HIST] falta la lista ' + LISTA_HIST + ': no se registro el evento', origen); return; }
+  if (!App.listas[LISTA_HIST]) { console.warn('[HIST] falta la lista ' + LISTA_HIST + ': no se registro el evento', origen); avisoFaltaHistorial(); return; }
   var camb = anterior ? cambiosPerfilTx(anterior, actual) : [];
   var r = {
     Title: 'HIST-' + (actual.num_cliente || actual.id) + '-' + Date.now(),
@@ -8475,7 +8477,10 @@ function renderHistorialRiesgo(c) {
         + '<td>' + nivel + '</td><td style="font-size:12px">' + det + '</td>'
         + '<td style="font-size:12px">' + capEsc(h.usuario || '') + '</td></tr>';
     }).join('');
-    ct.innerHTML = '<div class="twrap"><table><thead><tr><th>Fecha</th><th>Origen</th><th>Nivel</th><th>Motivo</th><th>Usuario</th></tr></thead>'
+    ct.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+      + '<span style="font-size:12px;color:var(--tx2)">' + ev.length + (ev.length === 1 ? ' evento' : ' eventos') + ' · art. 41 fr. IV: se conserva al menos diez anios</span>'
+      + '<button class="btn btn-sm" onclick="exportarHistorialXLS(\'' + c.id + '\')">&#x2193; Exportar historial (Excel)</button></div>'
+      + '<div class="twrap"><table><thead><tr><th>Fecha</th><th>Origen</th><th>Nivel</th><th>Motivo</th><th>Usuario</th></tr></thead>'
       + '<tbody>' + filas + '</tbody></table></div>';
     etiquetarTablasMovil(ct);
   });
@@ -16082,13 +16087,18 @@ function xlsxConFormato(wb, hoja, listas, condicionales) {
   }
   var idxDxf = condicionales.length ? (+(sx.match(/<dxfs count="(\d+)"/) || [0, 1])[1] - 1) : 0;
   poner(st, sx);
-  var sh = ent('xl/worksheets/sheet' + hoja + '.xml'), x = leer(sh);
-  // Encabezado con estilo, fila mas alta y fija al desplazarse.
-  x = x.replace(/<row r="1"([^>]*)>([\s\S]*?)<\/row>/, function(m, attrs, celdas){
-    return '<row r="1"' + attrs.replace(/\s(ht|customHeight)="[^"]*"/g, '') + ' ht="48" customHeight="1">' + celdas.replace(/<c r="([A-Z]+1)"(\s+s="\d+")?/g, '<c r="$1" s="' + idxXf + '"') + '</row>';
+  // Encabezado con estilo, fila mas alta y fija al desplazarse. hoja puede ser
+  // una lista de hojas; las listas y los formatos condicionales van en la primera.
+  var hojas = [].concat(hoja), x = '', sh = null;
+  hojas.forEach(function(nh, iH){
+    var e = ent('xl/worksheets/sheet' + nh + '.xml'), t = leer(e);
+    t = t.replace(/<row r="1"([^>]*)>([\s\S]*?)<\/row>/, function(m, attrs, celdas){
+      return '<row r="1"' + attrs.replace(/\s(ht|customHeight)="[^"]*"/g, '') + ' ht="48" customHeight="1">' + celdas.replace(/<c r="([A-Z]+1)"(\s+s="\d+")?/g, '<c r="$1" s="' + idxXf + '"') + '</row>';
+    });
+    t = t.replace(/<sheetView([^>]*)\/>/, '<sheetView$1><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView>');
+    if (iH === 0) { sh = e; x = t; } else poner(e, t);
   });
-  x = x.replace(/<sheetView([^>]*)\/>/, '<sheetView$1><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView>');
-  var dv = '<dataValidations count="' + listas.length + '">' + listas.map(function(l){
+  var dv = !listas.length ? '' : '<dataValidations count="' + listas.length + '">' + listas.map(function(l){
     return '<dataValidation type="list" allowBlank="1" showInputMessage="' + (l.mensaje ? 1 : 0) + '" showErrorMessage="1"'
       + ' errorTitle="Valor no valido" error="Elige un valor de la lista."'
       + (l.titulo ? ' promptTitle="' + esc(l.titulo) + '"' : '') + (l.mensaje ? ' prompt="' + esc(l.mensaje) + '"' : '')
@@ -16882,7 +16892,8 @@ function pgReportes() {
     +'<div class="sb-item" onclick="exportarClientesXLS()">&#x2193; Clientes 360</div>'
     +'<div class="sb-item" onclick="exportarOpsLiqXLS()">&#x2193; Operaciones de liquidacion</div>'
     +'<div class="sb-item" onclick="exportarAlertasXLS()">&#x2193; Alertas</div>'
-    +'<div class="sb-item" onclick="exportarExpedientesXLS()">&#x2193; Expedientes</div>');
+    +'<div class="sb-item" onclick="exportarExpedientesXLS()">&#x2193; Expedientes</div>'
+    +'<div class="sb-item" onclick="exportarHistorialXLS()">&#x2193; Historial de riesgo</div>');
 
   function card(icono, titulo, desc, fn) {
     return '<div class="card" style="margin-bottom:12px"><div class="card-b" style="padding:16px;display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap">'
@@ -16897,6 +16908,8 @@ function pgReportes() {
     + card('&#128181;','Operaciones de liquidacion','Todas las operaciones registradas con su cliente, RFC y detalle de liquidacion.','exportarOpsLiqXLS()')
     + card('&#128276;','Alertas','Todas las alertas con todos sus campos: categoria, tipo, cliente, montos, atencion y evidencia de reporte (folio, fecha y estatus del envio, acuse y XML).','exportarAlertasXLS()')
     + card('&#128193;','Expedientes','Avance de integracion documental por cliente: asesor comercial y % de documentos obligatorios cargados.','exportarExpedientesXLS()')
+    + card('&#128200;','Historial de riesgo','Cada cambio del grado de riesgo y del perfil transaccional por cliente (alta, edicion, revaloracion, resolucion de screening), con motivo, reglas, usuario y el perfil vigente en cada evento. Art. 41 fr. IV: se conserva al menos diez anios.'
+        + (App.listas[LISTA_HIST] ? '' : ' <strong style="color:var(--rj)">Falta la lista ' + LISTA_HIST + ' en SharePoint.</strong>'),'exportarHistorialXLS()')
     +'<div style="font-size:12px;color:var(--tx3);margin-top:4px">Los reportes respetan la entidad seleccionada (o consolidan en "Todas las entidades").</div>');
 }
 
@@ -17249,6 +17262,87 @@ function _generarAlertasXLSX() {
     XLSX.writeFile(wb, 'Alertas_PLD_'+(esConsolidada?'TODAS':entId)+'_'+fecha.replace(/-/g,'')+'.xlsx');
     toast('Reporte de alertas exportado: '+filas.length+' alertas', 's');
   });
+}
+
+// ================================================================
+//  EXPORTACIÓN XLSX — HISTORIAL DEL GRADO DE RIESGO Y DEL PERFIL
+// ================================================================
+// Articulo 41 fr. IV: el historial de las modificaciones del grado de riesgo
+// y del perfil transaccional, para entregarlo a la autoridad. idCli: un solo
+// cliente (desde su ficha); sin el, todos los de la entidad seleccionada.
+function exportarHistorialXLS(idCli) {
+  if (!App.listas[LISTA_HIST]) { avisoFaltaHistorial(true); return; }
+  pensador('Cargando la libreria de exportacion...');
+  cargarSheetJS(function(){ _generarHistorialXLSX(idCli); });
+}
+function _generarHistorialXLSX(idCli) {
+  pensadorPaso('Generando el historial de riesgo...');
+  var entId = App.entidadActual ? App.entidadActual.id : null;
+  var esConsolidada = entId === 'TODAS' || !entId;
+  spGet(LISTA_HIST, function(lista) {
+    lista = lista || [];
+    if (idCli) lista = lista.filter(function(h){ return String(h.id_cliente_ref) === String(idCli); });
+    else if (!esConsolidada) lista = lista.filter(function(h){ return h.entidad_id === entId || !h.entidad_id; });
+    else lista = filtrarPermitidas(lista);
+    lista.sort(function(a, b){ return String(a.num_cliente || '').localeCompare(String(b.num_cliente || '')) || String(a.fecha || '').localeCompare(String(b.fecha || '')); });
+    var fh = function(f){ return String(f || '').replace('T', ' ').substring(0, 16); };
+    var cols = ['Fecha','Num. Cliente','Cliente','Tipo de cliente','Entidad','Origen del cambio','Ciclo de revaloracion',
+      'Nivel anterior','Nivel nuevo','Cambio de nivel','Modelo','Motivo','Reglas cumplidas','Agravantes',
+      'Campos del perfil modificados','Justificacion','Coincidencia resuelta','Usuario'];
+    var filas = lista.map(function(h){
+      var camb = (h.perfil_cambios || []).map(function(k){ return ETQ_PTX_HIST[k] || k; }).filter(function(x, i, a){ return a.indexOf(x) === i; });
+      return [fh(h.fecha), nStr(h.num_cliente), h.nombre_cliente || '', h.tipo || '', h.entidad_nombre || h.entidad_id || '',
+        h.origen || '', h.ciclo || '', h.nivel_anterior || '', h.nivel_nuevo || '',
+        (h.nivel_anterior && h.nivel_anterior !== h.nivel_nuevo) ? 'SI' : (h.nivel_anterior ? 'NO' : 'Alta / primer registro'),
+        h.modelo || '', h.motivo || '', (h.reglas || []).join(' | '), h.agravantes === '' || h.agravantes === undefined ? '' : h.agravantes,
+        camb.join(', '), h.justificacion || '', h.coincidencia || '', h.usuario || ''];
+    });
+    // El perfil transaccional vigente en cada evento, un campo por columna.
+    var camposP = CAMPOS_PTX_HIST.filter(function(k){ return !/_otro$/.test(k) && k !== 'canal_intermediario'; });
+    var etqP = function(k){
+      var t = ETQ_PTX_HIST[k] || k, pre = /^(ptx_arr_|renta_)/.test(k) ? 'Arrendamiento: ' : /^ptx_cv_/.test(k) ? 'Compraventa: ' : '';
+      return pre ? pre + t : t.charAt(0).toUpperCase() + t.slice(1);
+    };
+    var colsP = ['Fecha','Num. Cliente','Cliente','Origen del cambio'].concat(camposP.map(etqP));
+    var filasP = lista.map(function(h){
+      var p = h.perfil_tx || {};
+      return [fh(h.fecha), nStr(h.num_cliente), h.nombre_cliente || '', h.origen || ''].concat(camposP.map(function(k){ return fmtCampoPtx(k, p); }));
+    });
+    var fecha = hoy(), clientes = {};
+    lista.forEach(function(h){ clientes[h.id_cliente_ref] = true; });
+    var wsH = XLSX.utils.aoa_to_sheet([cols].concat(filas));
+    wsH['!cols'] = [17,14,34,12,22,22,12,12,12,14,10,50,60,10,40,40,40,26].map(function(w){ return { wch: w }; });
+    var wsP = XLSX.utils.aoa_to_sheet([colsP].concat(filasP));
+    wsP['!cols'] = colsP.map(function(c, i){ return { wch: i === 2 ? 34 : Math.max(14, String(c).length + 2) }; });
+    var cli = idCli ? (App.clientes || []).filter(function(c){ return String(c.id) === String(idCli); })[0] : null;
+    var wsInfo = XLSX.utils.aoa_to_sheet([
+      ['Historial del grado de riesgo y del perfil transaccional - PLD Corporativo SMS'],
+      ['Fundamento', 'Art. 41 fr. IV de las Reglas de Caracter General de la LFPIORPI: registros historicos de las modificaciones en el grado de riesgo y en el perfil transaccional, conservados por al menos diez anios.'],
+      [cli ? 'Cliente' : 'Entidad', cli ? nStr(cli.num_cliente) + ' — ' + nombreCliente(cli) : (esConsolidada ? 'Todas las entidades' : (App.entidadActual.nombre || entId))],
+      ['Fecha de exportacion', fecha],
+      ['Eventos', filas.length],
+      ['Clientes con eventos', Object.keys(clientes).length],
+      ['Contenido', 'Hoja Historial: cada cambio de nivel o de perfil (alta, edicion, revaloracion, resolucion de screening). Hoja Perfil transaccional: el perfil vigente en cada evento.']
+    ]);
+    wsInfo['!cols'] = [{ wch: 24 }, { wch: 110 }];
+    var wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsH, 'Historial');
+    XLSX.utils.book_append_sheet(wb, wsP, 'Perfil transaccional');
+    XLSX.utils.book_append_sheet(wb, wsInfo, 'Info');
+    var nombre = 'Historial_Riesgo_' + (cli ? nStr(cli.num_cliente) : (esConsolidada ? 'TODAS' : entId)) + '_' + fecha.replace(/-/g, '') + '.xlsx';
+    var out;
+    try { out = xlsxConFormato(wb, [1, 2], [], []); } catch (e) { out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }); }
+    pensadorOff();
+    descargarArchivo(out, nombre, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    toast('Historial exportado: ' + filas.length + ' evento(s)', filas.length ? 's' : 'w');
+  });
+}
+// Falta la lista del historial: los cambios de nivel y de perfil no se estan
+// guardando. Se avisa una vez por sesion (o siempre, si se pide de nuevo).
+function avisoFaltaHistorial(siempre) {
+  if (App._avisoHist && !siempre) return;
+  App._avisoHist = true;
+  toast('Falta la lista ' + LISTA_HIST + ' en SharePoint: los cambios de nivel de riesgo y de perfil transaccional no se estan guardando en el historial (art. 41 fr. IV). Creala con una columna Datos de texto multilinea y vuelve a entrar a la app.', 'e');
 }
 
 // ================================================================
