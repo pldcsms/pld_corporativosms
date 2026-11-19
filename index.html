@@ -1815,6 +1815,7 @@ function iniciarApp() {
         try { iniciarScrMasivoDiario(); } catch(e){ console.warn('[SCR] diario', e); }
         // Sin la lista del historial no se guardan los cambios de nivel (art. 41 fr. IV).
         if (!App.listas[LISTA_HIST] && App.rol === 'admin') setTimeout(function(){ avisoFaltaHistorial(); }, 3000);
+        if (!App.listas[LISTA_BIT] && App.rol === 'admin') setTimeout(function(){ avisoFaltaBitacora(); }, 5000);
       });
       }); // cargarRolUsuario
     });
@@ -1952,8 +1953,111 @@ function spAlertasDeCliente(datos, cb) {
   spBuscar('PLD_Alertas', partes.join(' or '), cb);
 }
 
+// ================================================================
+//  BITÁCORA (art. 2 fr. XI Ter: mecanismo verificable ante la autoridad)
+// ================================================================
+// Cada alta, edicion y borrado que la app hace en las listas auditadas queda
+// en PLD_Bitacora: quien, cuando, sobre que y, en las ediciones, los campos que
+// cambiaron (antes y despues); en los borrados, una copia del registro. La
+// lista solo se agrega: la app nunca edita ni borra la bitacora. Las acciones
+// con nombre propio (resolver una coincidencia, aprobar un cliente, marcar
+// operaciones como reportadas) lo ponen con bitCtx() justo antes de escribir.
+var LISTA_BIT = 'PLD_Bitacora';
+var BIT_LISTAS = { PLD_Config: 'Configuracion', PLD_Usuarios: 'Configuracion', PLD_Clientes: 'Expediente',
+                   PLD_Ops_Liq: 'Operaciones', PLD_Alertas: 'Screening y alertas', PLD_Operaciones: 'Avisos' };
+var BIT_OBJETO = { PLD_Config: 'configuracion', PLD_Usuarios: 'rol de usuario', PLD_Clientes: 'expediente',
+                   PLD_Ops_Liq: 'operacion', PLD_Alertas: 'alerta', PLD_Operaciones: 'aviso' };
+// Registros de PLD_Config que la app escribe sola (fechas de sincronizacion).
+var BIT_CONFIG_AUTOMATICA = ['scr_listas_config', 'scr_masivo_diario', 'pepm_sync'];
+var BIT_EXCLUIR = { Datos: 1, id: 1, ediciones: 1, fecha_actualizacion: 1, _norm: 1, '@odata.etag': 1 };
+function bitCtx(o) { App._bitCtx = o; }
+function bitTomarCtx() { var c = App._bitCtx || null; App._bitCtx = null; return c; }
+function bitValor(v) {
+  if (v === undefined || v === null) return '';
+  var s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  return s.length > 300 ? s.substring(0, 300) + '…' : s;
+}
+// Campos que cambiaron, con su ruta (ebr_config.niveles.cv.PF). Los arreglos
+// se comparan completos.
+function bitCambios(a, b, pref, prof, out) {
+  out = out || []; a = a || {}; b = b || {}; prof = prof || 0;
+  var claves = {};
+  Object.keys(a).concat(Object.keys(b)).forEach(function(k){ if (!BIT_EXCLUIR[k]) claves[k] = 1; });
+  Object.keys(claves).forEach(function(k){
+    if (out.length >= 80) return;
+    var va = a[k], vb = b[k], ruta = (pref ? pref + '.' : '') + k;
+    var obj = function(v){ return v && typeof v === 'object' && !Array.isArray(v); };
+    if (obj(va) && obj(vb) && prof < 4) { bitCambios(va, vb, ruta, prof + 1, out); return; }
+    var sa = va === undefined || va === null ? '' : JSON.stringify(va), sb = vb === undefined || vb === null ? '' : JSON.stringify(vb);
+    if (sa !== sb) out.push({ campo: ruta, antes: bitValor(va), despues: bitValor(vb) });
+  });
+  return out;
+}
+var _colaBit = [], _bitOcupada = false;
+function registrarBitacora(e) {
+  if (!App.listas || !App.listas[LISTA_BIT]) { avisoFaltaBitacora(); return; }
+  var r = Object.assign({
+    Title: 'BIT-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+    fecha: new Date().toISOString(),
+    usuario: App.cuenta ? App.cuenta.username : '', usuario_nombre: App.cuenta ? (App.cuenta.name || '') : '', rol: App.rol || '',
+    entidad_id: App.entidadActual ? App.entidadActual.id : '', entidad_nombre: App.entidadActual ? App.entidadActual.nombre : ''
+  }, e);
+  _colaBit.push(r);
+  correrColaBit();
+}
+// De una en una, para no saturar SharePoint (429) en importaciones o corridas masivas.
+function correrColaBit() {
+  if (_bitOcupada) return;
+  var r = _colaBit.shift();
+  if (!r) return;
+  _bitOcupada = true;
+  spCreate(LISTA_BIT, r, function(){ _bitOcupada = false; setTimeout(correrColaBit, 60); });
+}
+function avisoFaltaBitacora() {
+  if (App._avisoBit) return;
+  App._avisoBit = true;
+  toast('Falta la lista ' + LISTA_BIT + ' en SharePoint: las acciones no se estan registrando en la bitacora. Creala con una columna Datos de texto multilinea y vuelve a entrar a la app.', 'e');
+}
+// Se llama despues de cada escritura en una lista. tipo: alta, edicion o borrado.
+function bitDesdeEscritura(lista, tipo, antes, despues, id, ctx) {
+  if (!BIT_LISTAS[lista] || (ctx && ctx.omitir)) return;
+  var reg = despues || antes || {};
+  if (lista === 'PLD_Config' && !ctx && BIT_CONFIG_AUTOMATICA.indexOf(reg.clave || reg.Title) >= 0) return;
+  var cambios = tipo === 'edicion' ? bitCambios(antes, despues) : [];
+  if (tipo === 'edicion' && !cambios.length) return;
+  var objeto = BIT_OBJETO[lista];
+  var nombre = lista === 'PLD_Clientes' ? nombreCliente(reg)
+    : lista === 'PLD_Config' ? (reg.clave || reg.Title || 'CONFIG_SISTEMA')
+    : lista === 'PLD_Usuarios' ? (reg.correo || reg.Title || '')
+    : (reg.nombre_cliente || '');
+  var auto = lista === 'PLD_Ops_Liq' ? 'Operacion del ' + String(reg.fecha_pago || '').substring(0, 10) + ' por ' + fmtMXN(montoOpMXN(reg))
+    : lista === 'PLD_Alertas' ? (reg.tipo || 'Alerta') + (reg.nivel ? ' (' + reg.nivel + ')' : '')
+    : lista === 'PLD_Usuarios' ? (reg.correo || '') + (reg.rol ? ': rol ' + reg.rol : '')
+    : nombre;
+  var r = {
+    grupo: (ctx && ctx.grupo) || BIT_LISTAS[lista],
+    accion: (ctx && ctx.accion) || ({ alta: 'Alta de ', edicion: 'Edicion de ', borrado: 'Borrado de ' }[tipo] + objeto),
+    tipo_cambio: tipo, lista: lista, objeto: objeto, objeto_id: String(id || reg.id || ''), objeto_nombre: nombre,
+    id_cliente_ref: lista === 'PLD_Clientes' ? String(id || reg.id || '') : String(reg.id_cliente_ref || ''),
+    num_cliente: reg.num_cliente || '',
+    resumen: (ctx && ctx.resumen) || auto,
+    cambios: cambios
+  };
+  if (reg.entidad_id) { r.entidad_id = reg.entidad_id; r.entidad_nombre = reg.entidad_nombre || ''; }
+  if (tipo === 'borrado') { var cp = JSON.stringify(antes || {}); r.copia = cp.length > 30000 ? cp.substring(0, 30000) + '…' : cp; }
+  registrarBitacora(r);
+}
+function bitLeer(lid, itemId, cb) {
+  graph('GET', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId+'?expand=fields', null, function(item){
+    var v = null;
+    try { v = item && item.fields && item.fields.Datos ? JSON.parse(item.fields.Datos) : null; } catch (e) {}
+    cb(v);
+  });
+}
+
 function spCreate(lista, datos, cb) {
   var lid = App.listas[lista];
+  var ctxBit = lista === LISTA_BIT ? null : bitTomarCtx();
   if (!lid) { toast('Lista '+lista+' no encontrada','e'); if(cb) cb(null); return; }
   var titulo = datos.Title || datos.nombre || datos.razon_social || datos.folio || ('Item-'+Date.now());
   var _campos = {Title:String(titulo).substring(0,255), Datos:JSON.stringify(datos)};
@@ -1961,25 +2065,35 @@ function spCreate(lista, datos, cb) {
   graph('POST', '/sites/'+App.siteId+'/lists/'+lid+'/items',
     {fields:_campos},
     function(d) {
-      if (d && d.id) { datos.id=String(d.id); if(cb) cb(datos); }
+      if (d && d.id) { datos.id=String(d.id); bitDesdeEscritura(lista, 'alta', null, datos, datos.id, ctxBit); if(cb) cb(datos); }
       else { console.error('spCreate error:',d); toast('Error al guardar en SharePoint','e'); if(cb) cb(null); }
     });
 }
 
 function spUpdate(lista, itemId, datos, cb) {
   var lid = App.listas[lista];
+  var ctxBit = bitTomarCtx();
   if (!lid) { if(cb) cb(null); return; }
   var titulo = datos.Title || datos.nombre || datos.razon_social || ('Item-'+itemId);
   var _campos = {Title:String(titulo).substring(0,255), Datos:JSON.stringify(datos)};
   Object.assign(_campos, camposIndexados(lista, datos));
-  graph('PATCH', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId+'/fields',
-    _campos,
-    function(d){ if(cb) cb(d); });
+  var escribir = function(antes){
+    graph('PATCH', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId+'/fields',
+      _campos,
+      function(d){
+        if (antes !== undefined && d && !d.error) bitDesdeEscritura(lista, 'edicion', antes, datos, itemId, ctxBit);
+        if(cb) cb(d);
+      });
+  };
+  // Lista auditada: se lee el registro antes de reescribirlo, para la bitacora.
+  if (BIT_LISTAS[lista] && !(ctxBit && ctxBit.omitir)) bitLeer(lid, itemId, function(antes){ escribir(antes || {}); });
+  else escribir(undefined);
 }
 
 // Actualiza solo los campos indicados sin sobreescribir el resto del registro
 function spPatch(lista, itemId, campos, cb) {
   var lid = App.listas[lista];
+  var ctxBit = bitTomarCtx();
   if (!lid) { if(cb) cb(null); return; }
   graph('GET', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId+'?expand=fields', null, function(item) {
     // Si la lectura no trajo el registro (error de Graph o de red), abortar.
@@ -2000,17 +2114,27 @@ function spPatch(lista, itemId, campos, cb) {
     Object.assign(_campos, camposIndexados(lista, merged));
     graph('PATCH', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId+'/fields',
       _campos,
-      function(d){ if(cb) cb(d); });
+      function(d){
+        if (d && !d.error) bitDesdeEscritura(lista, 'edicion', actual, merged, itemId, ctxBit);
+        if(cb) cb(d);
+      });
   });
 }
 
 function spDelete(lista, itemId, cb) {
   var lid = App.listas[lista];
+  var ctxBit = bitTomarCtx();
   if (!lid) { if(cb) cb(false); return; }
-  graph('DELETE', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId, null, function(d){
-    if (d && d.error) { console.error('spDelete error:', d.error); if(cb) cb(false); return; }
-    if(cb) cb(true);
-  });
+  var borrar = function(antes){
+    graph('DELETE', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+itemId, null, function(d){
+      if (d && d.error) { console.error('spDelete error:', d.error); if(cb) cb(false); return; }
+      if (antes !== undefined) bitDesdeEscritura(lista, 'borrado', antes, null, itemId, ctxBit);
+      if(cb) cb(true);
+    });
+  };
+  // Lista auditada: se guarda una copia del registro en la bitacora.
+  if (BIT_LISTAS[lista] && !(ctxBit && ctxBit.omitir)) bitLeer(lid, itemId, function(antes){ borrar(antes || {}); });
+  else borrar(undefined);
 }
 
 // ================================================================
@@ -5455,6 +5579,7 @@ function recalcularMontosMXN() {
         var cv = montoAMXN(o.total_operacion || o.monto || 0, o.moneda, o.fecha_pago, o.tc_manual ? o.tipo_cambio_aplicado : 0);
         if (cv.estimado) estimadas++;
         var subO = parseFloat(o.subtotal !== undefined && o.subtotal !== null && o.subtotal !== '' ? o.subtotal : o.monto) || 0;
+        bitCtx({ omitir: true });   // un solo registro de resumen al terminar
         spPatch('PLD_Ops_Liq', o.id, {
           monto_mxn: Math.round(cv.mxn * 100) / 100,
           subtotal_mxn: Math.round(subO * cv.tc * 100) / 100,
@@ -5464,6 +5589,8 @@ function recalcularMontosMXN() {
         }, function(){
           hechas++; pend--;
           if (pend === 0) {
+            registrarBitacora({ grupo: 'Operaciones', accion: 'Recalculo de equivalentes en MXN', tipo_cambio: 'edicion', lista: 'PLD_Ops_Liq', objeto: 'operaciones',
+              resumen: hechas + ' operaciones recalculadas con el tipo de cambio de su fecha' + (estimadas ? '; ' + estimadas + ' con tipo de cambio estimado' : '') });
             toast('Recalculadas '+hechas+' operaciones'+(estimadas ? (' — '+estimadas+' con tipo de cambio estimado') : ''), 's');
           }
         });
@@ -5695,7 +5822,8 @@ function eliminarRolUsuario(id) {
   if (!confirm('¿Eliminar este usuario? Quedará con rol "usuario" por defecto.')) return;
   var lid = App.listas['PLD_Usuarios'];
   if (!lid) return;
-  graph('DELETE', '/sites/'+App.siteId+'/lists/'+lid+'/items/'+id, null, function(){
+  bitCtx({ accion: 'Baja de rol de usuario' });
+  spDelete('PLD_Usuarios', id, function(){
     toast('Usuario eliminado','s'); pgConfig();
   });
 }
@@ -6829,6 +6957,7 @@ function guardarReval(e, texto, cb) {
     c2.ciclo_ult_revaluacion = cic.clave;
     c2.fecha_ult_revaluacion = hoy();
     var antesReval = JSON.parse(JSON.stringify(c));
+    bitCtx({ accion: 'Revaloracion del cliente', resumen: 'Ciclo ' + cic.clave + ': ' + (c.riesgo || '-') + ' → ' + (c2.riesgo || '-') + (texto ? '. Justificacion: ' + texto : '') });
     spUpdate('PLD_Clientes', c.id, c2, function(res){
       if (!res || res.error) { cb(false); return; }
       registrarHistorialRiesgo('Revaloracion', antesReval, c2, { ciclo: cic.clave, estado_revaluacion: reg.estado, justificacion: texto || '', desviaciones: e.desv, perfil_operado: e.operado || null });
@@ -7980,6 +8109,7 @@ function screeningDDR(c) {
   cargarListasScreening(function(){ scrAlertasResolucionMasivo([c], 'Debida diligencia reforzada'); });
 }
 function patchDDR(c, r, msg, cb) {
+  bitCtx({ accion: msg && /completa/i.test(msg) ? 'Debida diligencia reforzada completada' : 'Debida diligencia reforzada guardada', resumen: msg || '' });
   spPatch('PLD_Clientes', c.id, { ddr: r }, function(ok){
     if (!ok || ok.error) { toast('No se pudo guardar la debida diligencia reforzada', 'e'); return; }
     c.ddr = r;
@@ -8160,6 +8290,7 @@ function guardarContratos() {
   if (falta.length) { toast('Cada contrato necesita identificador y fecha de inicio', 'w'); return; }
   var ids = lista.map(function(k){ return String(k.identificador).toUpperCase(); });
   if (ids.some(function(x, i){ return ids.indexOf(x) !== i; })) { toast('Hay dos contratos con el mismo identificador', 'w'); return; }
+  bitCtx({ accion: 'Contratos de arrendamiento guardados', resumen: lista.length + ' contrato(s): ' + lista.map(textoContrato).join('; ') });
   spPatch('PLD_Clientes', c.id, { contratos_arr: lista }, function(ok){
     if (!ok || ok.error) { toast('No se pudieron guardar los contratos', 'e'); return; }
     c.contratos_arr = lista;
@@ -8264,6 +8395,7 @@ function guardarInmuebles() {
   if (claves.some(function(x, i){ return claves.indexOf(x) !== i; })) { toast('Hay dos inmuebles con el mismo fraccionamiento y lote', 'w'); return; }
   // El primer inmueble se refleja en los campos del alta.
   var cambios = { inmuebles_cv: lista, nombre_fraccionamiento: lista[0].fraccionamiento, lote_inmueble: lista[0].lote || '' };
+  bitCtx({ accion: 'Inmuebles guardados', resumen: lista.length + ' inmueble(s): ' + lista.map(textoInmueble).join('; ') });
   spPatch('PLD_Clientes', c.id, cambios, function(ok){
     if (!ok || ok.error) { toast('No se pudieron guardar los inmuebles', 'e'); return; }
     Object.assign(c, cambios);
@@ -10237,6 +10369,7 @@ function renderFicha(c) {
     +'<div class="ftab" onclick="fichaTab(this,\'fd-scr\')">Screening</div>'
     +(c.es_arrendamiento==='SI' ? '<div class="ftab" onclick="fichaTab(this,\'fd-ctr\');renderContratos()">Contratos</div>' : '<div class="ftab" id="ftab-inm" onclick="fichaTab(this,\'fd-inm\');renderInmuebles()">Inmuebles</div>')
     +'<div class="ftab" onclick="fichaTab(this,\'fd-hist\');renderHistorialRiesgo(App.clienteActual)">Historial de riesgo</div>'
+    +(App.rol === 'admin' ? '<div class="ftab" onclick="fichaTab(this,\'fd-bit\');renderBitacoraCliente(App.clienteActual)">Bitacora</div>' : '')
     +((estadoDDR(c).aplica || c.ddr) ? '<div class="ftab" onclick="fichaTab(this,\'fd-ddr\');renderDDR()">Debida diligencia reforzada</div>' : '')
     +'</div>'
     +'<div class="card" style="border-radius:0 0 var(--rl) var(--rl)">'
@@ -10255,6 +10388,7 @@ function renderFicha(c) {
     +'<div id="fd-ctr" class="card-b" style="display:none"></div>'
     +'<div id="fd-inm" class="card-b" style="display:none"></div>'
     +'<div id="fd-hist" class="card-b" style="display:none"></div>'
+    +'<div id="fd-bit" class="card-b" style="display:none"></div>'
     +'<div id="fd-ddr" class="card-b" style="display:none"></div>'
     +'</div>';
   setMain(html);
@@ -10262,7 +10396,7 @@ function renderFicha(c) {
 
 function fichaTab(el,id) {
   document.querySelectorAll('.ftab').forEach(function(t){t.classList.remove('on');}); el.classList.add('on');
-  ['fd-datos','fd-dom','fd-rl','fd-bcs','fd-fid','fd-df','fd-dom-ext','fd-duen','fd-docs','fd-ops','fd-ptx','fd-scr','fd-ctr','fd-inm','fd-hist','fd-ddr'].forEach(function(i){
+  ['fd-datos','fd-dom','fd-rl','fd-bcs','fd-fid','fd-df','fd-dom-ext','fd-duen','fd-docs','fd-ops','fd-ptx','fd-scr','fd-ctr','fd-inm','fd-hist','fd-bit','fd-ddr'].forEach(function(i){
     var e=document.getElementById(i); if(e) e.style.display='none';
   });
   var t=document.getElementById(id); if(t) t.style.display='block';
@@ -11341,6 +11475,9 @@ function resolverCoincidencia(alertaId, i, decision) {
       aplicarRiesgo(cambios, r);
       var cliDdr = activarDDR(Object.assign({}, cli, cambios), cli);
       if (cliDdr.ddr && cliDdr.ddr !== cli.ddr) cambios.ddr = cliDdr.ddr;
+      bitCtx({ grupo: 'Screening y alertas', accion: 'Resolucion de coincidencia en listas',
+        resumen: (decision === 'CONFIRMADA' ? 'Confirmada' : 'Falso positivo') + ': ' + (res.parte || 'Cliente') + ' ' + (res.nombre_evaluado || '')
+          + ' en ' + (res.lista || '') + ' (' + (res.score || 0) + '%). Fundamento: ' + fundamento });
       spPatch('PLD_Clientes', cli.id, cambios, function(okC) {
         if (!okC || okC.error) { toast('No se pudo actualizar el expediente', 'e'); return; }
         if ((cli.riesgo || '') !== (cambios.riesgo || ''))
@@ -11549,6 +11686,7 @@ function marcarOpsReportadasDeAlerta(alerta, folio) {
         }
         return;
       }
+      bitCtx({ grupo: 'Avisos', accion: 'Operacion marcada como reportada en aviso', resumen: 'Folio ' + folio + ' · operacion del ' + String(o.fecha_pago || '').substring(0, 10) });
       spPatch('PLD_Ops_Liq', o.id, {reportada: true, ref_aviso_reportado: folio}, function() {
         contador++;
         if (contador === opsAMarcar.length) {
@@ -13861,6 +13999,7 @@ function guardarXMLEnSharePoint(xmlContent, nombreArchivo, op) {
     // Actualizar el aviso con la URL del XML
     op.url_xml = urlXML;
     op.fecha_xml = hoy();
+    bitCtx({ grupo: 'Avisos', accion: 'XML de aviso generado y archivado', resumen: nombreArchivo + ' · ' + (op.nombre_cliente || '') + ' · ' + urlXML });
     spUpdate('PLD_Operaciones', op.id, op, null);
     pensadorOff();
 
@@ -15066,6 +15205,9 @@ function decidirTercero(alertaId, decision) {
     if (a.decision_tercero) { toast('Esta alerta ya tiene decision', 'w'); verAlerta(alertaId); return; }
     var quien = App.cuenta ? (App.cuenta.name || App.cuenta.username) : '';
     var dec = { decision: decision, fundamento: fund, por: quien, fecha: hoy() };
+    bitCtx({ grupo: 'Screening y alertas', accion: 'Decision sobre el tercero que paga',
+      resumen: ({ DEVOLVER: 'Se devuelven los recursos', NO_DEVOLVER: 'No se devuelven los recursos', ACEPTAR: 'Operacion aceptada (69-B)', RECHAZAR: 'Operacion rechazada (69-B)' }[decision] || decision)
+        + ' · ' + (a.tercero_nombre || '') + '. Fundamento: ' + fund });
     spPatch('PLD_Alertas', a.id, { decision_tercero: dec, estatus: 'Cerrada', estatus_atencion: 'Cerrada', resuelto_por: quien, fecha_resolucion: hoy() }, function(){
       var cambiosOp = a.scr_tercero_decision === 'DEVOLUCION'
         ? { devolucion: dec }
@@ -15478,6 +15620,7 @@ function aprobarCliente(alertaId) {
       reautenticar(function(ok){
         if (!ok) { toast('Aprobación cancelada: no se verificó la identidad','e'); return; }
         var quien = App.cuenta ? (App.cuenta.name || App.cuenta.username) : '';
+        bitCtx({ accion: 'Aprobacion del cliente', resumen: 'Aprobado por ' + quien + ' (' + cargo + '). Comentario: ' + comentario });
         spPatch('PLD_Clientes', cli.id, { aprobacion:'Aprobado', estatus:'Activo', aprobado_por: quien, aprobado_cargo: cargo, fecha_aprobacion: hoy() }, function(){
           spPatch('PLD_Alertas', a.id, {
             aprobacion_estado:'Aprobado', estatus_atencion:'Cerrada', estatus:'Cerrada',
@@ -15511,6 +15654,7 @@ function rechazarClienteModificar(alertaId) {
       var comEl = document.getElementById('apr-comentario');
       var comentario = comEl ? comEl.value.trim() : '';
       var quien = App.cuenta ? (App.cuenta.name || App.cuenta.username) : '';
+      bitCtx({ accion: 'Rechazo para modificar el expediente', resumen: 'Rechazado por ' + quien + (comentario ? '. Comentario: ' + comentario : '') });
       spPatch('PLD_Clientes', cli.id, { aprobacion:'Rechazado' }, function(){
         spPatch('PLD_Alertas', a.id, {
           aprobacion_estado:'Rechazado', estatus_atencion:'Cerrada', estatus:'Cerrada',
@@ -16418,6 +16562,8 @@ function procesarExcel(data, fraccion) {
       + (sinPaisImp.length ? (sinPaisImp.length === 1 ? 'La fila ' : 'Las filas ') + sinPaisImp.join(', ') + ': transferencia internacional sin pais de procedencia (o con Mexico); no se importaron. ' : '')
       + (efCvImp.length ? (efCvImp.length === 1 ? 'La fila ' : 'Las filas ') + sinTxt(efCvImp) + ': con ese pago, el efectivo y metales preciosos del inmueble llegarian a 8,025 UMA o mas (art. 32 fr. I LFPIORPI); no se importaron. ' : '');
     msgSinTC = msgSinTC.trim();
+    registrarBitacora({ grupo: 'Operaciones', accion: 'Importacion de operaciones desde Excel', tipo_cambio: 'alta', lista: 'PLD_Ops_Liq', objeto: 'operaciones',
+      resumen: 'Archivo: hoja "' + sheetName + '", fraccion ' + (fraccion === 'ARI' ? 'XV' : 'V') + '. ' + registros.length + ' fila(s) por importar' + (msgSinTC ? '. ' + msgSinTC : '') });
     if (!registros.length) { pensadorOff(); toast(msgSinTC || 'No se encontraron registros con datos en el archivo', 'e'); return; }
     if (msgSinTC) toast(msgSinTC, 'w');
 
@@ -16893,7 +17039,8 @@ function pgReportes() {
     +'<div class="sb-item" onclick="exportarOpsLiqXLS()">&#x2193; Operaciones de liquidacion</div>'
     +'<div class="sb-item" onclick="exportarAlertasXLS()">&#x2193; Alertas</div>'
     +'<div class="sb-item" onclick="exportarExpedientesXLS()">&#x2193; Expedientes</div>'
-    +'<div class="sb-item" onclick="exportarHistorialXLS()">&#x2193; Historial de riesgo</div>');
+    +'<div class="sb-item" onclick="exportarHistorialXLS()">&#x2193; Historial de riesgo</div>'
+    +(App.rol === 'admin' ? '<div class="sb-sec">Auditoria</div><div class="sb-item" onclick="pgBitacora()">Bitacora</div>' : ''));
 
   function card(icono, titulo, desc, fn) {
     return '<div class="card" style="margin-bottom:12px"><div class="card-b" style="padding:16px;display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap">'
@@ -16910,6 +17057,8 @@ function pgReportes() {
     + card('&#128193;','Expedientes','Avance de integracion documental por cliente: asesor comercial y % de documentos obligatorios cargados.','exportarExpedientesXLS()')
     + card('&#128200;','Historial de riesgo','Cada cambio del grado de riesgo y del perfil transaccional por cliente (alta, edicion, revaloracion, resolucion de screening), con motivo, reglas, usuario y el perfil vigente en cada evento. Art. 41 fr. IV: se conserva al menos diez anios.'
         + (App.listas[LISTA_HIST] ? '' : ' <strong style="color:var(--rj)">Falta la lista ' + LISTA_HIST + ' en SharePoint.</strong>'),'exportarHistorialXLS()')
+    + (App.rol === 'admin' ? card('&#128269;','Bitacora','Quien hizo que y cuando en la app: configuracion, expedientes, screening y alertas, operaciones y avisos, con los campos que cambiaron. Consulta con filtros y exportacion (art. 2 fr. XI Ter).'
+        + (App.listas[LISTA_BIT] ? '' : ' <strong style="color:var(--rj)">Falta la lista ' + LISTA_BIT + ' en SharePoint.</strong>'),'pgBitacora()').replace('&#x2193; Descargar (XLS)', 'Consultar') : '')
     +'<div style="font-size:12px;color:var(--tx3);margin-top:4px">Los reportes respetan la entidad seleccionada (o consolidan en "Todas las entidades").</div>');
 }
 
@@ -17343,6 +17492,129 @@ function avisoFaltaHistorial(siempre) {
   if (App._avisoHist && !siempre) return;
   App._avisoHist = true;
   toast('Falta la lista ' + LISTA_HIST + ' en SharePoint: los cambios de nivel de riesgo y de perfil transaccional no se estan guardando en el historial (art. 41 fr. IV). Creala con una columna Datos de texto multilinea y vuelve a entrar a la app.', 'e');
+}
+
+// ================================================================
+//  BITÁCORA — consulta y exportación (solo administradores)
+// ================================================================
+var BIT_GRUPOS = ['Configuracion', 'Expediente', 'Screening y alertas', 'Operaciones', 'Avisos'];
+function bitFiltrar(lista, f) {
+  var t = scrNorm(f.texto || ''), u = String(f.usuario || '').toLowerCase().trim();
+  return (lista || []).filter(function(b){
+    var d = String(b.fecha || '').substring(0, 10);
+    if (f.desde && d < f.desde) return false;
+    if (f.hasta && d > f.hasta) return false;
+    if (f.grupo && b.grupo !== f.grupo) return false;
+    if (f.cliente && String(b.id_cliente_ref || '') !== String(f.cliente.id) && !(f.cliente.num_cliente && String(b.num_cliente || '') === String(f.cliente.num_cliente))) return false;
+    if (u && String(b.usuario || '').toLowerCase().indexOf(u) < 0 && String(b.usuario_nombre || '').toLowerCase().indexOf(u) < 0) return false;
+    if (t && scrNorm([b.accion, b.objeto_nombre, b.num_cliente, b.resumen].join(' ')).indexOf(t) < 0) return false;
+    return true;
+  }).sort(function(a, b){ return String(b.fecha || '').localeCompare(String(a.fecha || '')); });
+}
+function bitTextoCambios(b) {
+  return (b.cambios || []).map(function(c){ return c.campo + ': ' + (c.antes || 'vacio') + ' → ' + (c.despues || 'vacio'); }).join('\n');
+}
+function pgBitacora() {
+  if (App.rol !== 'admin') { toast('Solo un administrador puede consultar la bitacora', 'e'); return; }
+  if (!App.listas[LISTA_BIT]) { avisoFaltaBitacora(); App._avisoBit = false; }
+  var hace30 = sumarDias(hoy(), -30);
+  setMain('<div class="phdr"><div><div class="ptit">Bitacora</div>'
+    + '<div class="psub">Quien hizo que y cuando en la app: configuracion, expedientes, screening y alertas, operaciones y avisos (art. 2 fr. XI Ter)</div></div></div>'
+    + '<div class="card"><div class="card-b"><div class="fgrid">'
+    + '<div class="fg"><label class="lbl">Desde</label><input class="inp" type="date" id="bit-desde" value="' + hace30 + '"></div>'
+    + '<div class="fg"><label class="lbl">Hasta</label><input class="inp" type="date" id="bit-hasta" value="' + hoy() + '"></div>'
+    + '<div class="fg"><label class="lbl">Grupo</label><select class="sel" id="bit-grupo"><option value="">Todos</option>'
+    + BIT_GRUPOS.map(function(g){ return '<option value="' + g + '">' + g + '</option>'; }).join('') + '</select></div>'
+    + '<div class="fg"><label class="lbl">Usuario</label><input class="inp" id="bit-usuario" placeholder="correo o nombre"></div>'
+    + '<div class="fg full"><label class="lbl">Buscar</label><input class="inp" id="bit-texto" placeholder="cliente, numero, accion o texto del resumen"></div>'
+    + '</div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">'
+    + '<button class="btn" onclick="exportarBitacoraXLS()">&#x2193; Exportar (Excel)</button>'
+    + '<button class="btn btn-p" onclick="renderBitacora()">Consultar</button></div></div></div>'
+    + '<div id="bit-res"></div>');
+  renderBitacora();
+}
+function filtrosBitacora() {
+  var v = function(id){ var e = document.getElementById(id); return e ? e.value : ''; };
+  return { desde: v('bit-desde'), hasta: v('bit-hasta'), grupo: v('bit-grupo'), usuario: v('bit-usuario'), texto: v('bit-texto') };
+}
+function htmlTablaBitacora(regs, max) {
+  if (!regs.length) return '<div class="empty">Sin registros con esos filtros.</div>';
+  var filas = regs.slice(0, max || 300).map(function(b){
+    var camb = (b.cambios || []);
+    return '<tr><td style="white-space:nowrap;font-size:12px">' + capEsc(String(b.fecha || '').replace('T', ' ').substring(0, 16)) + '</td>'
+      + '<td style="font-size:12px">' + capEsc(b.usuario_nombre || b.usuario || '') + '<div style="font-size:11px;color:var(--tx3)">' + capEsc(b.rol || '') + '</div></td>'
+      + '<td style="font-size:12px">' + capEsc(b.grupo || '') + '</td>'
+      + '<td style="font-size:12px;font-weight:500">' + capEsc(b.accion || '') + '</td>'
+      + '<td style="font-size:12px">' + capEsc(b.objeto_nombre || '') + (b.num_cliente ? ' <span style="color:var(--tx3)">#' + capEsc(nStr(b.num_cliente)) + '</span>' : '') + '</td>'
+      + '<td style="font-size:12px">' + capEsc(b.resumen || '')
+      + (camb.length ? '<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--az2)">' + camb.length + (camb.length === 1 ? ' campo modificado' : ' campos modificados') + '</summary>'
+        + '<div style="font-size:11px;line-height:1.5;margin-top:4px">' + camb.map(function(c){ return '<div><strong>' + capEsc(c.campo) + ':</strong> ' + capEsc(c.antes || 'vacio') + ' → ' + capEsc(c.despues || 'vacio') + '</div>'; }).join('') + '</div></details>' : '')
+      + (b.copia ? '<div style="font-size:11px;color:var(--tx3)">Se guardo una copia del registro borrado</div>' : '')
+      + '</td></tr>';
+  }).join('');
+  return '<div class="twrap"><table><thead><tr><th>Fecha</th><th>Usuario</th><th>Grupo</th><th>Accion</th><th>Sobre</th><th>Detalle</th></tr></thead><tbody>' + filas + '</tbody></table></div>'
+    + (regs.length > (max || 300) ? '<div style="font-size:12px;color:var(--tx3);padding:8px 12px">Se muestran los ' + (max || 300) + ' mas recientes de ' + regs.length + '. Exporta a Excel para verlos todos.</div>' : '');
+}
+function renderBitacora() {
+  var ct = document.getElementById('bit-res');
+  if (!ct) return;
+  if (!App.listas[LISTA_BIT]) { ct.innerHTML = '<div class="alerta-banner">Falta la lista <strong>' + LISTA_BIT + '</strong> en SharePoint.</div>'; return; }
+  ct.innerHTML = '<div class="empty"><div class="spin" style="margin:0 auto"></div></div>';
+  spGet(LISTA_BIT, function(lista){
+    var regs = bitFiltrar(lista, filtrosBitacora());
+    ct.innerHTML = '<div class="card"><div class="card-h"><span class="card-t">Registros</span><span class="pill p-gr">' + regs.length + '</span></div>' + htmlTablaBitacora(regs) + '</div>';
+  });
+}
+// Exporta lo filtrado (o la bitacora de un cliente, desde su ficha).
+function exportarBitacoraXLS(idCli) {
+  if (App.rol !== 'admin') { toast('Solo un administrador puede exportar la bitacora', 'e'); return; }
+  if (!App.listas[LISTA_BIT]) { App._avisoBit = false; avisoFaltaBitacora(); return; }
+  var cli = idCli ? (App.clientes || []).filter(function(c){ return String(c.id) === String(idCli); })[0] : null;
+  var f = cli ? { cliente: cli } : filtrosBitacora();
+  pensador('Generando la bitacora...');
+  cargarSheetJS(function(){
+    spGet(LISTA_BIT, function(lista){
+      var regs = bitFiltrar(lista, f);
+      var cols = ['Fecha','Usuario','Nombre','Rol','Entidad','Grupo','Accion','Tipo de cambio','Lista','Sobre','Num. Cliente','Id del registro','Resumen','Campos modificados (antes → despues)','Copia del registro borrado'];
+      var filas = regs.map(function(b){
+        return [String(b.fecha || '').replace('T', ' ').substring(0, 19), b.usuario || '', b.usuario_nombre || '', b.rol || '', b.entidad_nombre || b.entidad_id || '',
+          b.grupo || '', b.accion || '', b.tipo_cambio || '', b.lista || '', b.objeto_nombre || '', nStr(b.num_cliente), b.objeto_id || '',
+          b.resumen || '', bitTextoCambios(b), b.copia || ''];
+      });
+      var ws = XLSX.utils.aoa_to_sheet([cols].concat(filas));
+      ws['!cols'] = [19,30,24,10,22,18,34,12,16,30,14,12,60,70,40].map(function(w){ return { wch: w }; });
+      var info = XLSX.utils.aoa_to_sheet([
+        ['Bitacora - PLD Corporativo SMS'],
+        ['Fundamento', 'Art. 2 fr. XI Ter de las Reglas de Caracter General de la LFPIORPI: mecanismos automatizados verificables ante la autoridad.'],
+        [cli ? 'Cliente' : 'Filtros', cli ? nStr(cli.num_cliente) + ' — ' + nombreCliente(cli) : ['Desde ' + (f.desde || '-'), 'hasta ' + (f.hasta || '-'), f.grupo ? 'grupo ' + f.grupo : 'todos los grupos', f.usuario ? 'usuario ' + f.usuario : '', f.texto ? 'texto "' + f.texto + '"' : ''].filter(Boolean).join(', ')],
+        ['Fecha de exportacion', hoy()], ['Registros', filas.length], ['Exportado por', App.cuenta ? App.cuenta.username : '']
+      ]);
+      info['!cols'] = [{ wch: 22 }, { wch: 110 }];
+      var wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Bitacora');
+      XLSX.utils.book_append_sheet(wb, info, 'Info');
+      var out;
+      try { out = xlsxConFormato(wb, 1, [], []); } catch (e) { out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }); }
+      pensadorOff();
+      descargarArchivo(out, 'Bitacora_PLD_' + (cli ? nStr(cli.num_cliente) : hoy().replace(/-/g, '')) + '.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      registrarBitacora({ grupo: 'Configuracion', accion: 'Exportacion de la bitacora', resumen: filas.length + ' registro(s)' + (cli ? ' del cliente ' + nStr(cli.num_cliente) : '') });
+      toast('Bitacora exportada: ' + filas.length + ' registro(s)', 's');
+    });
+  });
+}
+// Pestana "Bitacora" de la ficha (administradores).
+function renderBitacoraCliente(c) {
+  var ct = document.getElementById('fd-bit');
+  if (!ct || !c) return;
+  if (!App.listas[LISTA_BIT]) { ct.innerHTML = '<div class="alerta-banner">Falta la lista <strong>' + LISTA_BIT + '</strong> en SharePoint.</div>'; return; }
+  ct.innerHTML = '<div class="empty"><div class="spin" style="margin:0 auto"></div></div>';
+  spGet(LISTA_BIT, function(lista){
+    var regs = bitFiltrar(lista, { cliente: c });
+    ct.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
+      + '<span style="font-size:12px;color:var(--tx2)">' + regs.length + ' registro(s): expediente, sus operaciones y sus alertas</span>'
+      + '<button class="btn btn-sm" onclick="exportarBitacoraXLS(\'' + c.id + '\')">&#x2193; Exportar (Excel)</button></div>'
+      + htmlTablaBitacora(regs, 200);
+  });
 }
 
 // ================================================================
