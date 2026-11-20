@@ -7854,6 +7854,11 @@ function alertaDDROperacion(idCli, op) {
                   + (bs.parte && bs.parte !== 'Cliente' ? ' (' + bs.parte + (bs.nombre ? ': ' + bs.nombre : '') + ')' : '')
         : (c.estatus === 'Bloqueado' || c.aprobacion === 'Bloqueado') ? 'cliente bloqueado' : '';
   if (bloq) motivos.push(bloq);
+  // Arrendamiento: el cliente no se revisa en la operacion; si esta bloqueado
+  // por la lista ONU, el pago es una operacion con persona en la lista.
+  if (bs && esListaONU({ lista: bs.lista }) && (op.fraccion || '') === 'ARI')
+    crearAviso24h({ motivo: 'LISTA', cli: c, persona: (bs.parte || 'Cliente') + ': ' + (bs.nombre || nombreClienteDatos(c)), op_ref: op.id || '', op_fecha: op.fecha_pago || '', celebrada: true,
+      descripcion: 'Se registro un pago del ' + String(op.fecha_pago || '').substring(0, 10) + ' de un cliente bloqueado por coincidencia confirmada en ' + bs.lista + '.' });
   if (est.aplica && est.estado !== 'completa')
     motivos.push('cliente de riesgo Alto con debida diligencia reforzada ' + (est.estado === 'vencida' ? 'vencida' : 'pendiente de completar'));
   if (p.pepAFR || p.pepExt)
@@ -10367,6 +10372,7 @@ function renderFicha(c) {
     +(c.aprobacion==='Pendiente'
        ? '<span class="pill p-am" title="En validación">🔒 En validación — pendiente de aprobación</span>'
        : '<button class="btn btn-p" onclick="iniciarForm(\''+c.tipo+'\',App.clienteActual)">Editar</button>')
+    +'<button class="btn" style="color:var(--rj);border-color:var(--rj)" title="Sospecha, hechos o indicios: aviso dentro de 24 horas" onclick="nuevoAviso24hForm(\''+c.id+'\')">Aviso de 24 horas</button>'
     +'<button class="btn" onclick="pgClientes()">Volver</button>'
     +'</div></div>'
     +'<div style="display:flex;border-bottom:1px solid var(--brd);flex-wrap:wrap">'
@@ -11160,6 +11166,113 @@ function subirDoc(input, tipoDoc, carpeta) {
 //  ALERTAS
 // ================================================================
 // ── Helper: categoría efectiva de una alerta ─────────────────
+// ── AVISO DE 24 HORAS ────────────────────────────────────────
+// Art. 18 fr. VI, segundo parrafo, de la LFPIORPI; arts. 26 Bis, 26 Bis 1,
+// 26 Bis 2 y 27 de las Reglas; art. 7 Bis del Reglamento. Se presenta dentro
+// de las 24 horas siguientes a que se conoce el hecho, aunque la operacion no
+// se haya celebrado o no llegue al umbral. La app lo genera sola cuando quien
+// opera o intenta operar esta en la lista del art. 38 (ONU) con coincidencia
+// confirmada, y el oficial lo registra a mano por sospecha o por hechos o
+// indicios de otras fuentes.
+var MOTIVOS_24H = [
+  ['LISTA', 'Persona incluida en la lista del art. 38 (ONU)', 'art. 27 de las Reglas'],
+  ['SOSPECHA', 'Sospecha por el comportamiento del cliente', 'art. 26 Bis de las Reglas'],
+  ['INDICIOS', 'Hechos o indicios conocidos por otras fuentes', 'art. 26 Bis 1 de las Reglas']
+];
+function motivo24h(k) { return MOTIVOS_24H.filter(function(x){ return x[0] === k; })[0] || [k, k, '']; }
+function esListaONU(m) { return !!m && /(^|[^A-Z])(ONU|UNSC|UN)([^A-Z]|$)|NACIONES UNIDAS/i.test(String(m.listaId || '') + ' ' + String(m.lista || '')); }
+function fmtFechaHora(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso || '');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+// o: { motivo, cli | nombre, persona, op_ref, op_fecha, celebrada, detectado (ISO), descripcion, fraccion }
+function crearAviso24h(o, cb) {
+  var det = o.detectado || new Date().toISOString();
+  var plazo = new Date(new Date(det).getTime() + 24 * 3600 * 1000).toISOString();
+  var cli = o.cli || null, m = motivo24h(o.motivo);
+  var reg = {
+    Title: 'ALT-24H-' + Date.now(), categoria: 'Aviso 24 horas', aviso24: true, motivo_24h: o.motivo,
+    tipo: 'Aviso de 24 horas: ' + m[1], nivel: 'Alto',
+    nombre_cliente: cli ? nombreCliente(cli) : (o.nombre || ''), num_cliente: cli ? (cli.num_cliente || '') : '', id_cliente_ref: cli ? cli.id : '',
+    fraccion: o.fraccion || (cli ? (cli.es_arrendamiento === 'SI' ? 'ARI' : 'INM') : ''),
+    persona_24h: o.persona || '', op_ref: o.op_ref || '', op_fecha: o.op_fecha || '',
+    operacion_celebrada: o.celebrada === undefined ? '' : (o.celebrada ? 'SI' : 'NO'),
+    detectado: det, plazo_24h: plazo,
+    descripcion: m[1] + ' (' + m[2] + '). ' + (o.descripcion || '')
+      + ' El aviso se presenta a mas tardar el ' + fmtFechaHora(plazo) + ', aunque la operacion no se haya celebrado o no llegue al umbral (art. 7 Bis del Reglamento).',
+    estatus: 'Abierta', estatus_atencion: 'Pendiente',
+    asesor_id: cli ? (cli.asesor_id || '') : '', asesor_nombre: cli ? (cli.asesor_nombre || '') : '',
+    registrado_por: App.cuenta ? App.cuenta.username : '', fecha_registro: hoy(),
+    entidad_id: cli ? (cli.entidad_id || '') : (App.entidadActual ? App.entidadActual.id : ''),
+    entidad_nombre: cli ? (cli.entidad_nombre || '') : (App.entidadActual ? App.entidadActual.nombre : '')
+  };
+  var crear = function(){
+    spCreate('PLD_Alertas', reg, function(item){
+      toast('AVISO DE 24 HORAS (' + m[1].toLowerCase() + '): presentarlo a mas tardar el ' + fmtFechaHora(plazo), 'e');
+      if (cb) cb(item);
+    });
+  };
+  if (!cli || o.manual) { crear(); return; }
+  // Automaticos: una sola alerta abierta por persona, motivo y operacion.
+  spAlertasDeCliente(cli, function(alts){
+    var dup = (alts || []).some(function(a){
+      return a.aviso24 && a.motivo_24h === o.motivo && a.estatus !== 'Cerrada' && (a.estatus_atencion || 'Pendiente') === 'Pendiente'
+        && String(a.persona_24h || '') === String(reg.persona_24h) && String(a.op_ref || '') === String(reg.op_ref);
+    });
+    if (dup) { if (cb) cb(null); return; }
+    crear();
+  });
+}
+// Plazo de un aviso de 24 horas: presentado, vencido o lo que falta.
+function htmlPlazo24h(a) {
+  if (!a || !a.aviso24) return '';
+  if (a.fecha_envio_aviso || a.folio_acuse || a.estatus_atencion === 'Reportada') return '<span class="pill p-vd" style="font-size:10px">Aviso 24 h presentado</span>';
+  if (a.estatus_atencion === 'Cerrada') return '';
+  var ms = new Date(a.plazo_24h).getTime() - Date.now();
+  if (isNaN(ms)) return '';
+  if (ms < 0) return '<span class="pill p-rj" style="font-size:10px" title="Vencio el ' + fmtFechaHora(a.plazo_24h) + '">Plazo de 24 h vencido</span>';
+  var h = Math.floor(ms / 3600000), mi = Math.floor((ms % 3600000) / 60000);
+  return '<span class="pill ' + (h < 6 ? 'p-rj' : 'p-am') + '" style="font-size:10px" title="Vence el ' + fmtFechaHora(a.plazo_24h) + '">Vence en ' + h + ' h ' + mi + ' min</span>';
+}
+// Registro manual: sospecha o hechos o indicios (tambien persona en lista
+// detectada fuera del screening). La persona puede no ser cliente: basta con
+// los datos que la identifiquen (art. 26 Bis 2 de las Reglas).
+function nuevoAviso24hForm(idCli) {
+  var ahora = new Date(), loc = ahora.getFullYear() + '-' + pad(ahora.getMonth() + 1) + '-' + pad(ahora.getDate()) + 'T' + pad(ahora.getHours()) + ':' + pad(ahora.getMinutes());
+  var opsCli = '<option value="">-- Cliente sin expediente (escribe sus datos abajo) --</option>' + (App.clientes || []).map(function(c){
+    return '<option value="' + capEsc(c.id) + '"' + (String(c.id) === String(idCli || '') ? ' selected' : '') + '>' + capEsc(nStr(c.num_cliente) + ' — ' + nombreCliente(c)) + '</option>';
+  }).join('');
+  setMain('<div class="phdr"><div><div class="ptit">Aviso de 24 horas</div>'
+    + '<div class="psub">Se presenta dentro de las 24 horas siguientes a que se conoce el hecho, aunque la operacion no se haya celebrado (art. 18 fr. VI LFPIORPI)</div></div>'
+    + '<button class="btn" onclick="' + (idCli ? 'abrirFicha(\'' + idCli + '\')' : 'pgAlertas()') + '">Volver</button></div>'
+    + '<div class="card"><div class="card-b"><div class="fgrid">'
+    + '<div class="fg full"><label class="lbl">Motivo <span class="req">*</span></label><select class="sel" id="a24-motivo">'
+    + MOTIVOS_24H.map(function(m){ return '<option value="' + m[0] + '"' + (m[0] === 'SOSPECHA' ? ' selected' : '') + '>' + m[1] + ' (' + m[2] + ')</option>'; }).join('') + '</select></div>'
+    + '<div class="fg full"><label class="lbl">Cliente</label><select class="sel" id="a24-cli">' + opsCli + '</select></div>'
+    + '<div class="fg full"><label class="lbl">Persona que realizo o intento la operacion (si no tiene expediente)</label><input class="inp" id="a24-nombre" placeholder="Nombre completo, RFC o CURP y datos que la identifiquen"></div>'
+    + '<div class="fg"><label class="lbl">Fecha y hora en que se conocio el hecho <span class="req">*</span></label><input class="inp" type="datetime-local" id="a24-det" value="' + loc + '"></div>'
+    + '<div class="fg"><label class="lbl">¿Se celebro la operacion?</label><select class="sel" id="a24-cel"><option value="">No aplica</option><option value="SI">Si</option><option value="NO">No, solo se intento</option></select></div>'
+    + '<div class="fg full"><label class="lbl">Descripcion: que se observo, por que es inusual o de donde viene la informacion <span class="req">*</span></label>'
+    + '<textarea class="txa" id="a24-desc" rows="4" placeholder="Montos, frecuencia, formas e instrumentos de pago, periodos, zona geografica y tipo de operacion (art. 26 Bis), o la fuente de los hechos o indicios (art. 26 Bis 1)"></textarea></div>'
+    + '</div><div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px"><button class="btn btn-p" onclick="guardarAviso24hForm()">Registrar aviso de 24 horas</button></div></div></div>');
+}
+function guardarAviso24hForm() {
+  var v = function(id){ var e = document.getElementById(id); return e ? String(e.value || '').trim() : ''; };
+  var idCli = v('a24-cli'), nombre = v('a24-nombre').toUpperCase(), desc = v('a24-desc'), det = v('a24-det');
+  if (!idCli && nombre.length < 5) { toast('Elige al cliente o escribe los datos de la persona que intento operar', 'w'); return; }
+  if (desc.length < 20) { toast('Describe que se observo o de donde viene la informacion', 'w'); return; }
+  var d = new Date(det);
+  if (!det || isNaN(d.getTime())) { toast('Indica la fecha y hora en que se conocio el hecho', 'w'); return; }
+  var cli = (App.clientes || []).filter(function(c){ return String(c.id) === idCli; })[0] || null;
+  var cel = v('a24-cel');
+  bitCtx({ grupo: 'Avisos', accion: 'Aviso de 24 horas registrado', resumen: motivo24h(v('a24-motivo'))[1] + ' · ' + (cli ? nombreCliente(cli) : nombre) });
+  crearAviso24h({ manual: true, motivo: v('a24-motivo'), cli: cli, nombre: nombre, persona: cli ? '' : nombre, detectado: d.toISOString(),
+                  celebrada: cel ? cel === 'SI' : undefined, descripcion: desc }, function(item){
+    if (item && item.id) verAlerta(item.id); else pgAlertas();
+  });
+}
+
 function altCategoria(a) {
   if (a.categoria) return a.categoria;
   if (a.tipo && (a.tipo.indexOf('Umbral') >= 0 || a.tipo.indexOf('umbral') >= 0)) return 'Umbral';
@@ -11177,16 +11290,19 @@ function pgAlertas() {
     +'<div class="sb-item" onclick="altVista(this,\'cat\',\'Umbral\')">⚠ Umbral operaciones</div>'
     +'<div class="sb-item" onclick="altVista(this,\'cat\',\'Perfil\')">📊 Perfil transaccional</div>'
     +'<div class="sb-item" onclick="altVista(this,\'cat\',\'Manual\')">✎ Manuales</div>'
+    +'<div class="sb-item" onclick="altVista(this,\'cat\',\'Aviso 24 horas\')">⏱ Avisos de 24 horas</div>'
     +'<div class="sb-sec" style="margin-top:8px">Por estatus</div>'
     +'<div class="sb-item" onclick="altVista(this,\'est\',\'Pendiente\')">Pendientes</div>'
     +'<div class="sb-item" onclick="altVista(this,\'est\',\'Reportada\')">Reportadas</div>'
     +'<div class="sb-item" onclick="altVista(this,\'est\',\'Cerrada\')">Cerradas</div>'
     +'<div class="sb-sec" style="margin-top:8px">Acciones</div>'
-    +'<div class="sb-item" onclick="nuevaAlertaForm()">+ Nueva alerta</div>');
+    +'<div class="sb-item" onclick="nuevaAlertaForm()">+ Nueva alerta</div>'
+    +'<div class="sb-item" onclick="nuevoAviso24hForm()">+ Aviso de 24 horas</div>');
 
   setMain('<div class="phdr">'
     +'<div><div class="ptit">Alertas PLD/FT</div><div class="psub">Panel de alertas por categoría</div></div>'
-    +'<button class="btn btn-p" onclick="nuevaAlertaForm()">+ Nueva alerta</button>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" style="color:var(--rj);border-color:var(--rj)" onclick="nuevoAviso24hForm()">+ Aviso de 24 horas</button>'
+    +'<button class="btn btn-p" onclick="nuevaAlertaForm()">+ Nueva alerta</button></div>'
     +'</div>'
     +'<div id="alertas-ct"><div class="empty"><div class="spin" style="margin:0 auto"></div></div></div>');
 
@@ -11216,6 +11332,7 @@ function cargarAlertas(modo, valor) {
       var umb  = todas.filter(function(a){ return altCategoria(a)==='Umbral'; });
       var prf  = todas.filter(function(a){ return altCategoria(a)==='Perfil'; });
       var man  = todas.filter(function(a){ return altCategoria(a)==='Manual'; });
+      var a24  = todas.filter(function(a){ return altCategoria(a)==='Aviso 24 horas'; });
       var apr  = todas.filter(function(a){ return a.requiere_aprobacion; });
       var pend = todas.filter(function(a){ return (a.estatus_atencion||'Pendiente')==='Pendiente'; });
 
@@ -11247,6 +11364,7 @@ function cargarAlertas(modo, valor) {
         + card('Umbral', umb, 'var(--mo)', '⚠')
         + card('Perfil transaccional', prf, 'var(--am)', '📊')
         + card('Manual', man, 'var(--az2)', '✎')
+        + card('Aviso 24 horas', a24, 'var(--rj)', '⏱')
         +'</div>'
         +'<div class="card"><div class="card-h"><span class="card-t">Alertas recientes</span>'
         +'<span style="font-size:12px;color:var(--tx3)">Últimas '+recientes.length+'</span></div>'
@@ -11260,7 +11378,7 @@ function cargarAlertas(modo, valor) {
     var titulo = 'Todas las alertas';
     if (modo === 'cat') {
       lista = todas.filter(function(a){ return altCategoria(a) === valor; });
-      titulo = { Screening: '🔍 Alertas de Screening', Riesgo: '🔴 Alertas de Riesgo alto', Umbral: '⚠ Alertas de Umbral', Perfil: '📊 Alertas de Perfil transaccional', Manual: '✎ Alertas manuales' }[valor] || valor;
+      titulo = { Screening: '🔍 Alertas de Screening', Riesgo: '🔴 Alertas de Riesgo alto', Umbral: '⚠ Alertas de Umbral', Perfil: '📊 Alertas de Perfil transaccional', Manual: '✎ Alertas manuales', 'Aviso 24 horas': '⏱ Avisos de 24 horas' }[valor] || valor;
     } else if (modo === 'est') {
       lista = todas.filter(function(a){ return (a.estatus_atencion||'Pendiente') === valor; });
       titulo = 'Alertas ' + valor.toLowerCase() + 's';
@@ -11283,8 +11401,8 @@ function altTabla(lista) {
     var cat = altCategoria(a);
     var nc  = a.nivel==='Alto'?'p-rj':a.nivel==='Medio'?'p-am':'p-vd';
     var esc = (a.estatus_atencion||'Pendiente')==='Reportada'?'p-vd':(a.estatus_atencion==='Cerrada'?'p-gr':'p-am');
-    var catCol = cat==='Screening'?'p-rj':cat==='Umbral'?'p-mo':'p-az';
-    var esUmbral = cat === 'Umbral';
+    var catCol = cat==='Screening'||cat==='Aviso 24 horas'?'p-rj':cat==='Umbral'?'p-mo':'p-az';
+    var esUmbral = cat === 'Umbral' || !!a.aviso24;
     return '<tr class="alt-row" data-altid="'+a.id+'">'
       +'<td style="font-size:11px;color:var(--tx3)">'+String(a.fecha_registro||'-').substring(0,10)+'</td>'
       +'<td><div style="font-weight:500">'+(a.nombre_cliente||'-')+'</div>'
@@ -11293,7 +11411,7 @@ function altTabla(lista) {
       +'<td style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(a.tipo||'-')+'</td>'
       +'<td>'+(a.fraccion?'<span class="pill '+(a.fraccion==='ARI'?'p-mo':'p-az')+'" style="font-size:10px">Fr.'+(a.fraccion==='ARI'?'XV':'V')+'</span>':'-')+'</td>'
       +'<td><span class="pill '+nc+'">'+(a.nivel||'-')+'</span></td>'
-      +'<td><span class="pill '+esc+'">'+(a.estatus_atencion||'Pendiente')+'</span></td>'
+      +'<td><span class="pill '+esc+'">'+(a.estatus_atencion||'Pendiente')+'</span>'+(a.aviso24?' '+htmlPlazo24h(a):'')+'</td>'
       +'<td>'
       +(esUmbral?'<button class="btn btn-xs btn-p crear-aviso-btn" data-altid="'+String(a.id)+'">Crear aviso</button> ':'')
       +'<button class="btn btn-xs ver-alerta-btn" data-altid="'+a.id+'">Ver</button>'
@@ -11314,7 +11432,9 @@ function verAlerta(id) {
 }
 
 function renderFichaAlerta(a) {
-  var esUmbral = a.tipo && a.tipo.indexOf('Umbral')>=0;
+  // Alertas que llevan a un aviso: las de umbral (por su categoria, cualquiera
+  // que sea su tipo) y las de aviso de 24 horas.
+  var esUmbral = altCategoria(a) === 'Umbral' || !!a.aviso24;
   var nc  = a.nivel==='Alto'?'p-rj':a.nivel==='Medio'?'p-am':'p-vd';
   var esc = (a.estatus_atencion||'Pendiente')==='Reportada'?'p-vd':(a.estatus_atencion==='Cerrada'?'p-gr':'p-am');
 
@@ -11324,7 +11444,7 @@ function renderFichaAlerta(a) {
     +'<span class="pill '+nc+'">'+(a.nivel||'-')+'</span>'
     +'<span class="pill '+esc+'">'+(a.estatus_atencion||'Pendiente')+'</span>'
     +'</div>'
-    +'<div class="psub">'+(a.tipo||'-')+(a.fraccion?' | Fr.'+(a.fraccion==='ARI'?'XV':'V'):'')+'</div>'
+    +'<div class="psub">'+(a.tipo||'-')+(a.fraccion?' | Fr.'+(a.fraccion==='ARI'?'XV':'V'):'')+(a.aviso24?' '+htmlPlazo24h(a):'')+'</div>'
     +'</div>'
     +'<div style="display:flex;gap:8px">'
     +(esUmbral?'<button class="btn btn-p crear-aviso-btn" data-altid="'+a.id+'">Crear aviso</button>':'')
@@ -11342,6 +11462,9 @@ function renderFichaAlerta(a) {
     +fcHtml('Umbral aplicable',a.monto_umbral?'$'+parseFloat(a.monto_umbral).toLocaleString('es-MX'):'')
     +fcHtml('Num. operaciones',a.num_operaciones)
     +fcHtml('Fecha registro',String(a.fecha_registro||'-').substring(0,10))
+    +(a.aviso24 ? fcHtml('Se conocio el hecho', fmtFechaHora(a.detectado)) + fcHtml('Plazo del aviso', fmtFechaHora(a.plazo_24h))
+        + (a.persona_24h ? fcHtml('Persona', capEsc(a.persona_24h)) : '')
+        + (a.operacion_celebrada ? fcHtml('Operacion celebrada', a.operacion_celebrada === 'SI' ? 'Si' : 'No, solo se intento') : '') : '')
     +'</div></div></div>'
 
     + seccionResolucionScr(a)
@@ -11559,6 +11682,11 @@ function resolverCoincidencia(alertaId, i, decision) {
         }
         spPatch('PLD_Alertas', a.id, camposA, function() {
           (App.clientes || []).forEach(function(x){ if (String(x.id) === String(cli.id)) Object.assign(x, cambios); });
+          // Persona confirmada en la lista ONU: aviso de 24 horas (art. 27 de las Reglas).
+          if (decision === 'CONFIRMADA' && !esPEP && esListaONU(c))
+            crearAviso24h({ motivo: 'LISTA', cli: cli, persona: (c.parte || 'Cliente') + ': ' + (c.nombre_evaluado || ''),
+              op_ref: esTer ? (c.op_ref || a.op_ref || '') : '', op_fecha: esTer ? (a.op_fecha || '') : '', celebrada: esTer ? false : undefined,
+              descripcion: 'Coincidencia confirmada en ' + (res.lista || 'la lista ONU') + ': ' + (res.nombre_lista || '') + (res.uid ? ' (ID ' + res.uid + ')' : '') + '. Fundamento: ' + fundamento + '.' });
           toast((decision === 'FALSO_POSITIVO' ? 'Falso positivo registrado'
                  : esPEP ? 'Coincidencia PEP confirmada' : esTer ? 'Coincidencia confirmada: operacion RECHAZADA' : 'Coincidencia confirmada: cliente BLOQUEADO')
                 + avisoPep + '. Riesgo: ' + r.nivel + (r.motivo ? ' (' + r.motivo + ')' : ''), decision === 'FALSO_POSITIVO' ? 's' : 'w');
@@ -11945,6 +12073,8 @@ function crearAvisoDesdeAlerta(alertaId) {
       var ahora = new Date();
       var hace6m = new Date(ahora.getFullYear(), ahora.getMonth()-6, ahora.getDate());
       var opsCliente = listaOps.filter(function(o) {
+        // Aviso de 24 horas: solo la operacion que lo origino, si la hubo.
+        if (a.aviso24) return !!a.op_ref && String(o.id) === String(a.op_ref);
         var mismoCliente = (cli && o.id_cliente_ref===cli.id) ||
                            (a.num_cliente && String(o.num_cliente)===String(a.num_cliente));
         var mismafrac = (o.fraccion||'INM')===fraccion;
@@ -11967,6 +12097,7 @@ function crearAvisoDesdeAlerta(alertaId) {
       // reciente entre esa y las de los pagos incluidos.
       var fechaActo = String(a.ventana_hasta || '').substring(0, 10);
       opsCliente.forEach(function(o){ var f = String(o.fecha_pago || '').substring(0, 10); if (f > fechaActo) fechaActo = f; });
+      if (a.aviso24) fechaActo = String(a.op_fecha || (a.detectado ? fmtFechaHora(a.detectado) : '') || '').substring(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaActo)) fechaActo = hoy();
 
       // Construir datos pre-llenados para el aviso
@@ -11974,9 +12105,9 @@ function crearAvisoDesdeAlerta(alertaId) {
         fraccion: fraccion,
         id_cliente_ref: cli ? cli.id : (a.id_cliente_ref||''),
         nombre_cliente: cli ? nombreCliente(cli) : (a.nombre_cliente||''),
-        tipo_alerta: '3114',  // El cliente insiste en liquidar en efectivo rebasando el umbral
+        tipo_alerta: a.aviso24 ? (a.motivo_24h === 'LISTA' ? '9999' : '3105') : '3114',  // 24 h: persona en lista u otra alerta; sospecha o indicios
         descripcion_alerta: a.descripcion || ('Umbral superado: $'+(a.monto_acumulado||0).toLocaleString('es-MX')),
-        prioridad: '1',
+        prioridad: a.aviso24 ? '2' : '1',                 // 2 = urgente (aviso de 24 horas)
         tipo_operacion: fraccion==='ARI' ? '1501' : '501',
         fecha_operacion: fechaActo,
         ref_alerta_origen: alertaId,
@@ -14908,6 +15039,9 @@ function alertasTercero(cli, op, st) {
   if (st.similares.length) pasos.push(function(cb){ alertaResolucionTercero(cli, op, st.similares, cb); });
   (function sig(){ var p = pasos.shift(); if (p) p(sig); })();
   if (st.exacta.length) toast('Operacion RECHAZADA: el tercero que paga coincide con ' + st.exacta[0].lista + '. Se aviso al oficial de cumplimiento', 'e');
+  var onuT = st.exacta.filter(esListaONU)[0];
+  if (onuT) crearAviso24h({ motivo: 'LISTA', cli: cli, nombre: op.nombre_cliente || '', persona: 'Tercero que paga: ' + (op.tercero_nombre || ''), op_ref: op.id || '', op_fecha: op.fecha_pago || '', celebrada: false,
+    fraccion: op.fraccion || '', descripcion: 'El tercero que paga coincide con ' + onuT.lista + ' (' + onuT.nombre + ', ' + onuT.score + '%' + (onuT.ya_confirmada ? ', coincidencia ya confirmada' : '') + '); la operacion quedo rechazada.' });
   else if (st.fiscal.length || st.similares.length) toast('El tercero que paga tiene coincidencias en listas: la operacion queda en revision', 'w');
 }
 
@@ -14973,6 +15107,9 @@ function alertasClienteOp(cli, op, st, cb) {
       entidad_id: op.entidad_id || cli.entidad_id || '', entidad_nombre: op.entidad_nombre || cli.entidad_nombre || ''
     }, listo);
     toast('Operacion RECHAZADA: el cliente tiene una coincidencia confirmada en ' + st.confirmada[0].lista, 'e');
+    var onuC = st.confirmada.filter(esListaONU)[0];
+    if (onuC) crearAviso24h({ motivo: 'LISTA', cli: cli, persona: 'Cliente: ' + nombreClienteDatos(cli), op_ref: op.id, op_fecha: op.fecha_pago || '', celebrada: false,
+      descripcion: 'El cliente, con coincidencia confirmada en ' + onuC.lista + ', intento registrar una operacion del ' + String(op.fecha_pago || '').substring(0, 10) + ' por ' + fmtMXN(montoOpMXN(op)) + '; la operacion quedo rechazada.' });
     return;
   }
   if (st.pendientes.length) {
