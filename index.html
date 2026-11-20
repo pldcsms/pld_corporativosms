@@ -11958,6 +11958,17 @@ function crearAvisoDesdeAlerta(alertaId) {
       // Guardar IDs de las ops que se incluirán en este aviso para marcarlas al guardar
       App._opsPendientesReportar = opsCliente.map(function(o){ return o.id; }).filter(Boolean);
 
+      // Fecha del acto u operacion para el aviso (de ella sale el mes que se
+      // reporta): Fr. V, la fecha en que el acto quedo liquidado (art. 24 Bis
+      // fr. III de las Reglas); Fr. XV, la de recepcion de los recursos de la
+      // mensualidad (art. 5 del Reglamento); en una acumulacion, la de la
+      // ultima operacion con la que se alcanzo el umbral (art. 7 del
+      // Reglamento). La alerta la guarda en ventana_hasta; se toma la mas
+      // reciente entre esa y las de los pagos incluidos.
+      var fechaActo = String(a.ventana_hasta || '').substring(0, 10);
+      opsCliente.forEach(function(o){ var f = String(o.fecha_pago || '').substring(0, 10); if (f > fechaActo) fechaActo = f; });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaActo)) fechaActo = hoy();
+
       // Construir datos pre-llenados para el aviso
       var datosAviso = {
         fraccion: fraccion,
@@ -11967,7 +11978,7 @@ function crearAvisoDesdeAlerta(alertaId) {
         descripcion_alerta: a.descripcion || ('Umbral superado: $'+(a.monto_acumulado||0).toLocaleString('es-MX')),
         prioridad: '1',
         tipo_operacion: fraccion==='ARI' ? '1501' : '501',
-        fecha_operacion: hoy(),
+        fecha_operacion: fechaActo,
         ref_alerta_origen: alertaId,
         // Liquidaciones desde operaciones acumuladas
         liquidaciones: opsCliente.map(function(o) {
@@ -11985,7 +11996,7 @@ function crearAvisoDesdeAlerta(alertaId) {
       App._fraccionAvisos = fraccion;
       irA('avisos');
       setTimeout(function(){ nuevaOpForm(datosAviso, fraccion); }, 300);
-      toast('Aviso pre-llenado con datos del cliente y '+(opsCliente.length)+' operaciones acumuladas','s');
+      toast('Aviso pre-llenado con datos del cliente y '+(opsCliente.length)+' operaciones acumuladas. Fecha de la operacion: '+fechaActo+' (mes que se reporta: '+fechaActo.substring(0, 7)+')','s');
     });
   });
 }
