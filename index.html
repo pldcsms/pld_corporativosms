@@ -8323,11 +8323,17 @@ function renderInmuebles(conservar) {
   var lista = App._inmBorrador, uso = App._inmUso && App._inmUso.cliente === c.id ? App._inmUso.porInm : null;
   var lim = limiteEfectivoCv();
   var filas = lista.map(function(k, i){
-    var u = uso ? (uso[String(k.id)] || { ops: 0, efectivo: 0 }) : null;
+    var u = uso ? (uso[String(k.id)] || { ops: 0, efectivo: 0, estado: estadoActoCv(k, []) }) : null;
+    if (u && !u.estado) u.estado = estadoActoCv(k, []);
     var pct = u && lim ? Math.min(100, Math.round(u.efectivo / lim * 100)) : 0;
     return '<tr data-inm="' + capEsc(k.id) + '">'
       + '<td style="min-width:220px">' + selectorFraccHtml(k.fraccionamiento, c.entidad_id, 'data-k="fraccionamiento"') + '</td>'
       + '<td><input class="inp" data-k="lote" value="' + capEsc(k.lote || '') + '" style="text-transform:uppercase;max-width:110px"></td>'
+      + '<td><input class="inp" data-k="precio" type="number" min="0" step="0.01" value="' + capEsc(k.precio || '') + '" placeholder="Sin IVA" style="max-width:140px"></td>'
+      + '<td><select class="sel" data-k="moneda_precio"><option value="MXN"' + (k.moneda_precio !== 'USD' ? ' selected' : '') + '>MXN</option><option value="USD"' + (k.moneda_precio === 'USD' ? ' selected' : '') + '>USD</option></select></td>'
+      + '<td style="font-size:12px;white-space:nowrap">' + (!u ? '…' : !(parseFloat(k.precio) > 0) ? '<span style="color:var(--am)">Falta el precio</span>'
+          : u.estado.liquidado ? '<span style="color:var(--vd)">Liquidada el ' + capEsc(u.estado.fecha_liq) + '</span>' : u.estado.pct + '% pagado') + '</td>'
+      + '<td><input class="inp" data-k="liquidado_fecha" type="date" value="' + capEsc(k.liquidado_fecha || '') + '" title="Solo si se liquido por un monto distinto al precio pactado (descuento o ajuste)"></td>'
       + '<td><input class="inp" data-k="alta" type="date" value="' + capEsc(k.alta || '') + '"></td>'
       + '<td style="font-size:12px">' + (u ? u.ops + (u.ops === 1 ? ' operacion' : ' operaciones') : '…') + '</td>'
       + '<td style="font-size:12px;white-space:nowrap">' + (u ? fmtMXN(u.efectivo) + ' <span style="color:' + (pct >= 100 ? 'var(--rj)' : pct >= 80 ? 'var(--am)' : 'var(--tx3)') + '">(' + pct + '% del limite)</span>' : '…') + '</td>'
@@ -8338,8 +8344,11 @@ function renderInmuebles(conservar) {
     + 'El efectivo y los metales preciosos se suman por inmueble: una operacion que lleve la suma a 8,025 UMA o mas (' + fmtMXN(lim) + ') no se puede registrar (art. 32 fr. I LFPIORPI). '
     + 'Para otro lote del mismo fraccionamiento, elige el fraccionamiento de la lista y escribe el lote.</div>'
     + (omision ? '<div class="alerta-banner"><span>Este expediente no tenia inmuebles registrados: se muestra el de su alta. Revisa los datos y guarda para registrarlo.</span></div>' : '')
-    + '<div class="twrap"><table><thead><tr><th>Fraccionamiento</th><th>Lote (opcional)</th><th>Alta</th><th>Operaciones</th><th>Efectivo y metales recibidos</th><th></th></tr></thead><tbody>'
-    + (filas || '<tr><td colspan="6" style="color:var(--tx3);font-size:12px">Sin inmuebles.</td></tr>') + '</tbody></table></div>'
+    + '<div style="font-size:12px;color:var(--tx2);margin-bottom:8px;line-height:1.6"><strong>Precio pactado (sin IVA):</strong> es el monto del acto (art. 6 del Reglamento). '
+    + 'Si es de 8,025 UMA o mas, el aviso se presenta cuando la compraventa queda liquidada (art. 24 Bis fr. III de las Reglas); las de menor precio se acumulan por cliente en seis meses. '
+    + 'La liquidacion se toma de los pagos; captura la <em>fecha de liquidacion</em> solo si se liquido por un monto distinto al precio pactado.</div>'
+    + '<div class="twrap"><table><thead><tr><th>Fraccionamiento</th><th>Lote (opcional)</th><th>Precio pactado</th><th>Moneda</th><th>Estado</th><th>Fecha de liquidacion (ajuste)</th><th>Alta</th><th>Operaciones</th><th>Efectivo y metales recibidos</th><th></th></tr></thead><tbody>'
+    + (filas || '<tr><td colspan="10" style="color:var(--tx3);font-size:12px">Sin inmuebles.</td></tr>') + '</tbody></table></div>'
     + '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn btn-sm" onclick="inmAgregar()">Agregar inmueble o lote</button>'
     + '<button class="btn btn-p btn-sm" onclick="guardarInmuebles()">Guardar inmuebles</button></div>';
   if (!uso) cargarUsoInmuebles(c);
@@ -8357,9 +8366,13 @@ function cargarUsoInmuebles(c) {
       var mismo = (c.id && String(o.id_cliente_ref || '') === String(c.id)) || (c.num_cliente && String(o.num_cliente || '') === String(c.num_cliente));
       if (!mismo) return;
       var k = String(o.inmueble_id || inmueblesDe(c)[0].id);
-      var u = porInm[k] || (porInm[k] = { ops: 0, efectivo: 0 });
-      u.ops++;
+      var u = porInm[k] || (porInm[k] = { ops: 0, efectivo: 0, lista: [] });
+      u.ops++; u.lista.push(o);
       if (esEfectivoArt32(o) && !opExcluida(o)) u.efectivo += montoOpMXN(o);
+    });
+    inmueblesDe(c).forEach(function(inm){
+      var u = porInm[String(inm.id)] || (porInm[String(inm.id)] = { ops: 0, efectivo: 0, lista: [] });
+      u.estado = estadoActoCv(inm, u.lista);
     });
     App._inmUso = { cliente: c.id, porInm: porInm };
     if (App.clienteActual && App.clienteActual.id === c.id && document.getElementById('fd-inm')) { inmLeerDom(); renderInmuebles(true); }
@@ -8371,7 +8384,7 @@ function inmLeerDom() {
     var k = lista[i]; if (!k) return;
     tr.querySelectorAll('[data-k]').forEach(function(el){
       var v = String(el.value || '').trim();
-      k[el.getAttribute('data-k')] = el.type === 'date' ? v : v.toUpperCase();
+      k[el.getAttribute('data-k')] = (el.type === 'date' || el.type === 'number') ? v : v.toUpperCase();
     });
   });
   return lista;
@@ -10900,22 +10913,35 @@ function renderOpsCliente() {
     // de los ultimos seis meses, sin las ya reportadas en un aviso ni las
     // devueltas. En arrendamiento, solo los pagos que alcanzan 1,605 UMA entran
     // al acumulado semestral.
-    // Por contrato (Fr. XV) o inmueble (Fr. V), en los seis meses al dia de
-    // hoy; la barra muestra el de mayor acumulado.
+    // Lo que acumula hoy el cliente, con el criterio de los umbrales (art. 7
+    // del Reglamento, por cliente y tipo de operacion, seis meses al dia de hoy).
+    // Fr. V: compraventas liquidadas por debajo de 8,025 UMA (las de 8,025 o
+    // mas van solas al aviso). Fr. XV: pagos de contratos con renta superior a
+    // 1,605 UMA y menor a 3,210 (las de 3,210 o mas van al aviso cada mes).
     function acumUmbral(arr, frac){
-      var desde = fechaMenosMeses(hoy(), 6), califARI = CFG_UMA.DIARIA * 1605, g = {};
-      arr.forEach(function(o){
-        if (o.reportada === true || opExcluida(o)) return;
-        var f = fechaOpUmbral(o);
-        if (f < desde || f > hoy()) return;
-        var m = subtotalOpMXN(o);
-        if (frac === 'ARI' && m < califARI) return;
-        var gr = grupoUmbral(o, frac, c), x = g[gr.id] || (g[gr.id] = { desc: gr.desc, total: 0, n: 0 });
-        x.total += m; x.n++;
-      });
-      var grupos = Object.keys(g).map(function(k){ return g[k]; }).sort(function(a, b){ return b.total - a.total; });
-      var r = grupos[0] || { desc: '', total: 0, n: 0 };
-      return { total: r.total, n: r.n, desc: r.desc, grupos: grupos };
+      var desde = fechaMenosMeses(hoy(), 6), uma = CFG_UMA.DIARIA, r = { total: 0, n: 0, desc: '', detalle: [] };
+      var vivas = arr.filter(function(o){ return !opExcluida(o); });
+      if (frac === 'ARI') {
+        contratosDe(c).forEach(function(k){
+          var rm = rentaMensualMXN(k, hoy());
+          if (!(rm > uma * 1605)) { r.detalle.push(textoContrato(k) + ': renta de 1,605 UMA o menos, no acumula'); return; }
+          if (rm >= uma * 3210) { r.detalle.push(textoContrato(k) + ': renta de 3,210 UMA o mas, aviso cada mes'); return; }
+          var l = vivas.filter(function(o){ var f = fechaOpUmbral(o); return String(o.contrato_id || '') === String(k.id) && o.reportada !== true && f >= desde && f <= hoy(); });
+          var t = l.reduce(function(s, o){ return s + subtotalOpMXN(o); }, 0);
+          r.total += t; r.n += l.length;
+          r.detalle.push(textoContrato(k) + ': ' + fmtMXN(t));
+        });
+        r.desc = 'contratos identificables';
+      } else {
+        inmueblesDe(c).forEach(function(inm){
+          var e = estadoActoCv(inm, vivas.filter(function(o){ return inmuebleIdOp(o, c) === String(inm.id); }));
+          var est = !e.precio ? 'sin precio pactado' : (e.liquidado ? 'liquidada el ' + e.fecha_liq : e.pct + '% pagado') + ', precio ' + fmtPrecioActo(e);
+          r.detalle.push(textoInmueble(inm) + ': ' + est + (e.precio_mxn >= uma * 8025 ? ' (aviso propio al liquidarse)' : ''));
+          if (e.liquidado && e.precio && e.precio_mxn < uma * 8025 && e.fecha_liq >= desde && e.ops.some(function(o){ return o.reportada !== true; })) { r.total += e.precio_mxn; r.n++; }
+        });
+        r.desc = 'compraventas liquidadas';
+      }
+      return r;
     }
     function umbralLabel(frac){
       var umas = frac==='ARI' ? CFG_UMA.UMBRAL_ARI : CFG_UMA.UMBRAL_INM;
@@ -10953,16 +10979,17 @@ function renderOpsCliente() {
 
       return '<div style="margin-bottom:6px">'
         +'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">'
-        +'<span style="color:var(--tx2)">Acumulado 6 meses'+(acum.desc ? ' ('+capEsc(acum.desc)+')' : '')+': <strong>$'+fmt2(acum.total)+'</strong> ('+acum.n+(acum.n===1?' operacion':' operaciones')+')</span>'
+        +'<span style="color:var(--tx2)">Acumulado 6 meses ('+capEsc(acum.desc)+'): <strong>$'+fmt2(acum.total)+'</strong> ('+acum.n+(frac==='ARI' ? (acum.n===1?' pago':' pagos') : (acum.n===1?' compraventa':' compraventas'))+')</span>'
         +'<span style="color:var(--tx3)">Umbral: '+umbralLabel(frac)+'</span>'
         +'</div>'
         +'<div style="height:8px;background:var(--brd);border-radius:4px;overflow:hidden;margin-bottom:4px">'
         +'<div style="height:100%;width:'+pct+'%;background:'+barCol+';border-radius:4px;transition:width .4s"></div>'
         +'</div>'
-        +'<div style="font-size:11px;color:var(--tx3);margin-bottom:10px">Lo que cuentan los umbrales: subtotales en pesos de los seis meses al dia de hoy, por '+(frac==='ARI' ? 'contrato' : 'inmueble')+', sin operaciones ya reportadas en un aviso, devueltas ni rechazadas'
-        +(frac==='ARI' ? '; solo los pagos de 1,605 UMA o mas.' : '.')
-        +(acum.grupos.length > 1 ? ' Otros: ' + acum.grupos.slice(1).map(function(x){ return capEsc(x.desc) + ' $' + fmt2(x.total); }).join(' · ') + '.' : '')
-        +' Cada pago se revisa ademas contra los seis meses anteriores a su propia fecha.</div>'
+        +'<div style="font-size:11px;color:var(--tx3);margin-bottom:10px">'
+        +(frac==='ARI'
+            ? 'Por cliente, en los seis meses al dia de hoy: pagos (sin IVA) de los contratos con renta mensual superior a 1,605 UMA y menor a 3,210 UMA, sin reportados, devueltos ni rechazados. '
+            : 'Por cliente, en los seis meses al dia de hoy: precios pactados (sin IVA) de las compraventas liquidadas por debajo de 8,025 UMA, sin reportadas. ')
+        +capEsc(acum.detalle.join(' · '))+'</div>'
         +'</div>'
         +'<div class="twrap"><table>'
         +'<thead><tr><th>Fecha pago</th><th>Forma pago</th><th>Moneda</th><th>Pago</th><th style="text-align:right">Subtotal (MXN)</th><th>Estado</th></tr></thead>'
@@ -14478,17 +14505,24 @@ function nuevaLiqForm(datos) {
 }
 
 // ── MOTOR DE DETECCIÓN DE UMBRALES ───────────────────────────
-// Art. 19 de las Reglas: la acumulacion es en periodos de hasta seis meses.
-// Cada pago revisa los seis meses ANTERIORES A SU FECHA DE PAGO (no a la de
-// captura), con las operaciones del mismo contrato (Fr. XV) o del mismo
-// inmueble (Fr. V) del cliente. Un pago capturado con fecha atrasada tambien
-// cae en la ventana de los pagos posteriores de los seis meses siguientes, asi
-// que esas ventanas se revisan de nuevo (decisiones del oficial de
-// cumplimiento, 19 nov 2026). La regla de Fr. V (una operacion de 8,025 UMA o
-// mas alerta sola; acumulado de seis meses; aviso al 70 %) y la de Fr. XV
-// (solo pagos de 1,605 UMA o mas) no cambian.
-// nuevaMonto es el subtotal EN PESOS de la operacion nueva (subtotal_mxn);
-// opNueva es la operacion (contrato o inmueble y moneda original).
+// Criterios (decisiones del oficial de cumplimiento, 20 nov 2026):
+//  - Monto sin contribuciones ni accesorios (art. 6 del Reglamento): subtotal
+//    en pesos; el aviso reporta el total.
+//  - Acumulacion con cada cliente, por tipo de acto u operacion, en periodos
+//    de hasta seis meses; cuenta lo que alcance o supere el umbral y el aviso
+//    sale con la ultima operacion que lo alcanza (art. 7 del Reglamento). Cada
+//    fecha revisa los seis meses anteriores a ella; una fecha atrasada tambien
+//    revisa las ventanas posteriores de los seis meses siguientes.
+//  - Fr. V: el acto es la compraventa del inmueble y su monto, el precio
+//    pactado sin IVA. Aviso cuando el precio llega a 8,025 UMA Y el acto queda
+//    liquidado (art. 24 Bis fr. III de las Reglas). Sin monto de
+//    identificacion, todas las compraventas acumulan: las liquidadas del
+//    cliente en seis meses.
+//  - Fr. XV: el valor mensual es la renta del contrato en un mes calendario
+//    (art. 31 del Reglamento). Identificacion: renta superior a 1,605 UMA.
+//    Aviso cada mes si la renta es de 3,210 UMA o mas (fecha: recepcion de la
+//    mensualidad, art. 5 del Reglamento). Los pagos de los contratos
+//    identificables por debajo de 3,210 UMA acumulan por cliente.
 function fechaMenosMeses(f, meses) {
   var d = new Date(String(f || hoy()).substring(0, 10) + 'T12:00:00');
   if (isNaN(d.getTime())) d = new Date();
@@ -14496,141 +14530,177 @@ function fechaMenosMeses(f, meses) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
 function fechaOpUmbral(o) { return String(o.fecha_pago || o.fecha_registro || '2000-01-01').substring(0, 10); }
-// Contrato (arrendamiento) o inmueble (compraventa) de la operacion. Las
-// operaciones anteriores sin inmueble cuentan en el primero del cliente.
-function grupoUmbral(o, fraccion, cli) {
-  if (fraccion === 'ARI') return { id: 'C:' + String(o.contrato_id || ''), desc: o.contrato_desc ? 'contrato ' + o.contrato_desc : 'sin contrato registrado' };
-  var inm0 = cli ? (inmueblesDe(cli)[0] || {}) : {};
-  var id = String(o.inmueble_id || inm0.id || '');
-  return { id: 'I:' + id, desc: o.inmueble_desc ? 'inmueble ' + o.inmueble_desc : (inm0.id && !o.inmueble_id ? 'inmueble ' + textoInmueble(inm0) : 'sin inmueble registrado') };
+// Inmueble de una operacion de compraventa (las anteriores sin inmueble, el primero).
+function inmuebleIdOp(o, cli) { return String(o.inmueble_id || (inmueblesDe(cli)[0] || {}).id || ''); }
+// Precio pactado del inmueble y si la compraventa ya quedo liquidada: con los
+// pagos (sin devueltos ni rechazados) o con la fecha que capturo el oficial
+// cuando el precio final fue distinto (descuento, ajuste).
+function estadoActoCv(inm, opsInm) {
+  var precio = parseFloat(inm && inm.precio) || 0, usd = !!(inm && inm.moneda_precio === 'USD');
+  var ops = (opsInm || []).filter(function(o){ return !opExcluida(o); })
+    .sort(function(a, b){ return fechaOpUmbral(a).localeCompare(fechaOpUmbral(b)); });
+  var pagado = 0, fechaLiq = '';
+  ops.forEach(function(o){
+    var sub = parseFloat(o.subtotal !== undefined && o.subtotal !== null && o.subtotal !== '' ? o.subtotal : o.monto) || 0;
+    var enPrecio = !usd ? subtotalOpMXN(o)
+      : String(o.moneda) === '2' ? sub : subtotalOpMXN(o) / (tcParaFecha(fechaOpUmbral(o), '2').valor || 1);
+    pagado += enPrecio;
+    if (!fechaLiq && precio > 0 && pagado >= precio - 1) fechaLiq = fechaOpUmbral(o);
+  });
+  if (inm && inm.liquidado_fecha) fechaLiq = String(inm.liquidado_fecha).substring(0, 10);
+  var tcP = usd ? (tcParaFecha(fechaLiq || hoy(), '2').valor || 0) : 1;
+  return { precio: precio, usd: usd, precio_mxn: precio * tcP, pagado: pagado,
+           pct: precio ? Math.min(100, Math.round(pagado / precio * 100)) : 0,
+           liquidado: !!fechaLiq, fecha_liq: fechaLiq, manual: !!(inm && inm.liquidado_fecha), ops: ops };
+}
+function fmtPrecioActo(e) { return e.usd ? 'USD ' + e.precio.toLocaleString('es-MX', { minimumFractionDigits: 2 }) + ' (' + fmtMXN(e.precio_mxn) + ')' : fmtMXN(e.precio); }
+// Renta mensual del contrato en pesos a una fecha.
+function rentaMensualMXN(k, f) {
+  var r = parseFloat(k && k.renta) || 0;
+  return k && k.moneda === 'USD' ? r * (tcParaFecha(f, '2').valor || 0) : r;
 }
 function verificarUmbralesCliente(idCli, nomCli, numCli, fraccion, nuevaMonto, nuevaFecha, idNuevoItem, cb, opNueva) {
-  var uma = CFG_UMA.DIARIA;
-  var esARI = fraccion === 'ARI';
+  var uma = CFG_UMA.DIARIA, esARI = fraccion === 'ARI';
   nuevaMonto = parseFloat(nuevaMonto) || 0;
   opNueva = opNueva || {};
   var cli = null; (App.clientes || []).forEach(function(c){ if (String(c.id) === String(idCli)) cli = c; });
-  var grupo = grupoUmbral(opNueva, fraccion, cli);
   var fNueva = String(nuevaFecha || hoy()).substring(0, 10);
-  var nuevaExt = esMonedaExtranjera(opNueva);
-  var origNueva = nuevaExt
-    ? ' (' + fmtMonedaOrig(opNueva.subtotal !== undefined ? opNueva.subtotal : opNueva.monto, opNueva.moneda)
-      + (parseFloat(opNueva.tipo_cambio_aplicado) > 0 ? ' al tipo de cambio ' + opNueva.tipo_cambio_aplicado + (opNueva.tc_fecha ? ' del ' + opNueva.tc_fecha : '') : '') + ')'
-    : '';
+  var L_INM = uma * 8025, L_ARI = uma * 3210, ID_ARI = uma * 1605;
   var NOTA_MXN = ' Montos en pesos: el subtotal de cada operacion en moneda extranjera se convierte con el tipo de cambio de su fecha.';
-  var base = { nombre_cliente: nomCli || 'Sin nombre', num_cliente: numCli, id_cliente_ref: idCli, fraccion: fraccion,
-               grupo_id: grupo.id, grupo_desc: grupo.desc, estatus_atencion: 'Pendiente' };
-
-  // Umbrales
-  var UMBRAL_MENSUAL_ARI  = uma * 1605;   // Fr. XV — un pago califica desde aqui
-  var UMBRAL_SEMESTRAL_ARI = uma * 3210;  // Fr. XV — acumulado semestral y mensual directo
-  var UMBRAL_INM           = uma * 8025;  // Fr. V  — individual y acumulado semestral
-
-  // ── VERIFICACIÓN INDIVIDUAL (Fr. V) ────────────────────────
-  if (!esARI && nuevaMonto >= UMBRAL_INM) {
-    crearAlertaUmbral(Object.assign({}, base, {
-      tipo: 'Umbral individual', nivel: 'Alto',
-      descripcion: 'Operacion individual del ' + fNueva + ' de $' + nuevaMonto.toLocaleString('es-MX') + ' MXN' + origNueva
-        + ' (' + grupo.desc + ') supera umbral de $' + UMBRAL_INM.toLocaleString('es-MX')
-        + ' (' + CFG_UMA.UMBRAL_INM.toLocaleString() + ' UMAs Fr.V)',
-      monto_acumulado: nuevaMonto, monto_umbral: UMBRAL_INM, num_operaciones: 1,
-      ops_umbral: idNuevoItem ? [String(idNuevoItem)] : [], ventana_desde: fNueva, ventana_hasta: fNueva
-    }));
-    toast('ALERTA UMBRAL Fr.V: $' + nuevaMonto.toLocaleString('es-MX'), 'w');
-    if (cb) cb();
-    return;
-  }
-  if (!idCli && !numCli && !nomCli) { if (cb) cb(); return; }
-
-  // ── HISTORIAL DEL MISMO CONTRATO O INMUEBLE ────────────────
+  var base = { nombre_cliente: nomCli || 'Sin nombre', num_cliente: numCli, id_cliente_ref: idCli, fraccion: fraccion, estatus_atencion: 'Pendiente' };
+  var fin = function(){ if (cb) cb(); };
+  if (!idCli && !numCli) { fin(); return; }
   spGet('PLD_Ops_Liq', function(todas) {
-    var delGrupo = (todas || []).filter(function(o) {
-      if (idNuevoItem && String(o.id) === String(idNuevoItem)) return false;   // se agrega abajo
-      if (o.reportada === true || opExcluida(o)) return false;                 // ya reportada, devuelta o rechazada
-      var mismoCliente = (idCli && o.id_cliente_ref === idCli) || (numCli && String(o.num_cliente) === String(numCli))
-        || (!idCli && !numCli && nomCli && o.nombre_cliente && o.nombre_cliente.trim().toLowerCase() === nomCli.trim().toLowerCase());
-      return mismoCliente && (o.fraccion || 'INM') === fraccion && grupoUmbral(o, fraccion, cli).id === grupo.id;
+    var delCliente = (todas || []).filter(function(o) {
+      if (idNuevoItem && String(o.id) === String(idNuevoItem)) return false;   // se agrega abajo, con los datos guardados
+      var mismo = (idCli && o.id_cliente_ref === idCli) || (numCli && String(o.num_cliente) === String(numCli));
+      return mismo && (o.fraccion || 'INM') === fraccion && !opExcluida(o);
     });
-    var nueva = { id: String(idNuevoItem || 'nueva'), fecha_pago: fNueva, monto: nuevaMonto, subtotal_mxn: nuevaMonto, fraccion: fraccion, moneda: opNueva.moneda };
-    var ops = delGrupo.concat(nuevaMonto > 0 ? [nueva] : []);
-    var notaMXN = (nuevaExt || delGrupo.some(esMonedaExtranjera)) ? NOTA_MXN : '';
-    // Ventana de un pago: los seis meses anteriores a su fecha, incluida.
-    var ventana = function(f){ var d = fechaMenosMeses(f, 6); return ops.filter(function(o){ var x = fechaOpUmbral(o); return x >= d && x <= f; }); };
-    // Fechas a revisar: la del pago nuevo y las de los pagos posteriores de los
-    // seis meses siguientes (su ventana ahora incluye al pago nuevo).
-    var hasta6 = fechaMenosMeses(fNueva, -6), anclas = [fNueva];
-    delGrupo.forEach(function(o){ var x = fechaOpUmbral(o); if (x > fNueva && x <= hasta6 && anclas.indexOf(x) < 0) anclas.push(x); });
-    anclas.sort();
+    if (nuevaMonto > 0) delCliente.push(Object.assign({}, opNueva, { id: String(idNuevoItem || 'nueva'), fecha_pago: fNueva, subtotal_mxn: nuevaMonto, fraccion: fraccion }));
+    var noRep = function(l){ return l.filter(function(o){ return o.reportada !== true; }); };
     var ids = function(l){ return l.map(function(o){ return String(o.id); }).filter(function(x){ return x !== 'nueva'; }); };
+    var nota = delCliente.some(esMonedaExtranjera) ? NOTA_MXN : '';
+    var unicos = function(arr){ return arr.filter(function(x, i){ return arr.indexOf(x) === i; }).sort(); };
 
-    if (esARI) {
-      // Solo los pagos que individualmente alcanzan 1,605 UMA entran a la
-      // acumulacion semestral y a la mensual directa.
-      var califica = function(o){ return subtotalOpMXN(o) >= UMBRAL_MENSUAL_ARI; };
-      var nuevaCalifica = nuevaMonto >= UMBRAL_MENSUAL_ARI;
-      // Mensual directa: mes de la operacion, no el de hoy.
-      var mesNueva = mesDe(fNueva);
-      var delMes = ops.filter(function(o){ return mesDe(fechaOpUmbral(o)) === mesNueva; });
-      var califMes = delMes.filter(califica), sumMes = califMes.reduce(function(s, o){ return s + subtotalOpMXN(o); }, 0);
-      if (sumMes >= UMBRAL_SEMESTRAL_ARI) {
-        var cruzaMes = (sumMes - (nuevaCalifica ? nuevaMonto : 0)) < UMBRAL_SEMESTRAL_ARI;
-        crearAlertaUmbral(Object.assign({}, base, {
-          tipo: 'Umbral mensual directo Fr.XV', nivel: 'Alto',
-          descripcion: 'Pagos que alcanzan 1,605 UMA en ' + mesNueva + ' (' + grupo.desc + ') suman $' + sumMes.toLocaleString('es-MX')
-            + ' y superan el umbral mensual de $' + UMBRAL_SEMESTRAL_ARI.toLocaleString('es-MX')
-            + ' (3,210 UMAs Fr.XV); ' + califMes.length + ' de ' + delMes.length + ' pagos del mes.' + notaMXN,
-          monto_acumulado: sumMes, monto_umbral: UMBRAL_SEMESTRAL_ARI, num_operaciones: califMes.length,
-          ops_umbral: ids(califMes), ventana_desde: mesNueva + '-01', ventana_hasta: fNueva
-        }));
-        if (cruzaMes) toast('ALERTA UMBRAL MENSUAL Fr.XV: $' + sumMes.toLocaleString('es-MX'), 'w');
+    if (!esARI) {
+      // ── Fr. V: compraventas ──
+      var actos = inmueblesDe(cli).map(function(inm){
+        var e = estadoActoCv(inm, delCliente.filter(function(o){ return inmuebleIdOp(o, cli) === String(inm.id); }));
+        e.inm = inm; return e;
+      });
+      var actual = actos.filter(function(a){ return String(a.inm.id) === inmuebleIdOp(opNueva, cli); })[0];
+      if (!actual) { fin(); return; }
+      var desc = 'inmueble ' + textoInmueble(actual.inm);
+      if (!actual.precio) {
+        toast('El ' + desc + ' no tiene precio pactado: capturalo en la pestana Inmuebles para evaluar el umbral de aviso', 'w');
+        fin(); return;
       }
-      // Semestral: la ventana con mayor acumulado entre el pago nuevo y los posteriores.
+      if (!actual.liquidado) {
+        if (actual.precio_mxn >= L_INM)
+          toast('El ' + desc + ' (precio ' + fmtPrecioActo(actual) + ') esta en supuesto de aviso: lleva ' + actual.pct + '% pagado. El aviso se presenta cuando quede liquidado.', 'i');
+        fin(); return;
+      }
+      // Acto individual: precio de 8,025 UMA o mas y liquidado.
+      if (actual.precio_mxn >= L_INM) {
+        var pend = noRep(actual.ops);
+        if (pend.length) {
+          crearAlertaUmbral(Object.assign({}, base, {
+            tipo: 'Aviso Fr.V: compraventa liquidada', nivel: 'Alto',
+            grupo_id: 'ACTO:' + actual.inm.id, grupo_desc: desc,
+            descripcion: 'La compraventa del ' + desc + ' quedo liquidada el ' + actual.fecha_liq + (actual.manual ? ' (fecha capturada por el oficial)' : '')
+              + '. Precio pactado sin IVA: ' + fmtPrecioActo(actual) + ', igual o superior a 8,025 UMA (' + fmtMXN(L_INM) + '). '
+              + 'Fecha del aviso: la de liquidacion (art. 24 Bis fr. III de las Reglas). ' + pend.length + (pend.length === 1 ? ' pago' : ' pagos') + ' por reportar.' + nota,
+            monto_acumulado: actual.precio_mxn, monto_umbral: L_INM, num_operaciones: pend.length,
+            ops_umbral: ids(pend), ventana_desde: fechaOpUmbral(pend[0]), ventana_hasta: actual.fecha_liq
+          }));
+          toast('AVISO Fr.V: la compraventa del ' + desc + ' quedo liquidada (precio ' + fmtPrecioActo(actual) + ')', 'w');
+        }
+        fin(); return;
+      }
+      // Acumulacion: compraventas del cliente liquidadas en seis meses.
+      var cand = actos.filter(function(a){ return a.liquidado && a.precio && a.precio_mxn < L_INM && noRep(a.ops).length; });
+      var F = actual.fecha_liq, hasta = fechaMenosMeses(F, -6);
+      var anclas = unicos([F].concat(cand.map(function(a){ return a.fecha_liq; }).filter(function(x){ return x > F && x <= hasta; })));
       var mejor = null;
-      anclas.forEach(function(f){
-        var l = ventana(f).filter(califica), s = l.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
-        if (!mejor || s > mejor.suma) mejor = { f: f, ops: l, suma: s };
+      anclas.forEach(function(A){
+        var d = fechaMenosMeses(A, 6), l = cand.filter(function(a){ return a.fecha_liq >= d && a.fecha_liq <= A; });
+        var s = l.reduce(function(t, a){ return t + a.precio_mxn; }, 0);
+        if (!mejor || s > mejor.s) mejor = { A: A, l: l, s: s };
       });
-      if (mejor && mejor.suma >= UMBRAL_SEMESTRAL_ARI) {
-        var conNueva = mejor.ops.some(function(o){ return o.id === nueva.id; });
-        var cruza = conNueva && (mejor.suma - (nuevaCalifica ? nuevaMonto : 0)) < UMBRAL_SEMESTRAL_ARI;
-        var meses = {};
-        mejor.ops.forEach(function(o){ var m = mesDe(fechaOpUmbral(o)); meses[m] = meses[m] || { t: 0, n: 0 }; meses[m].t += subtotalOpMXN(o); meses[m].n++; });
-        var descMeses = Object.keys(meses).sort().map(function(m){ return m + ' ($' + meses[m].t.toLocaleString('es-MX') + ', ' + meses[m].n + (meses[m].n === 1 ? ' pago' : ' pagos') + ')'; }).join(', ');
+      if (mejor && mejor.s >= L_INM) {
+        var opsA = [];
+        mejor.l.forEach(function(a){ opsA = opsA.concat(noRep(a.ops)); });
         crearAlertaUmbral(Object.assign({}, base, {
-          tipo: 'Umbral acumulado semestral Fr.XV', nivel: 'Alto',
-          descripcion: 'Acumulado de los seis meses al ' + mejor.f + ' (' + grupo.desc + ') de $' + mejor.suma.toLocaleString('es-MX')
-            + ' supera umbral de $' + UMBRAL_SEMESTRAL_ARI.toLocaleString('es-MX')
-            + ' (3,210 UMAs). Solo pagos que alcanzan 1,605 UMA, por mes: ' + descMeses + '.' + notaMXN,
-          monto_acumulado: mejor.suma, monto_umbral: UMBRAL_SEMESTRAL_ARI, num_operaciones: mejor.ops.length,
-          meses_califican: Object.keys(meses).length, ops_umbral: ids(mejor.ops), ventana_desde: fechaMenosMeses(mejor.f, 6), ventana_hasta: mejor.f
+          tipo: 'Umbral acumulado 6 meses Fr.V', nivel: 'Alto', grupo_id: 'CLI:INM', grupo_desc: 'compraventas del cliente',
+          descripcion: 'Compraventas liquidadas en los seis meses al ' + mejor.A + ' suman ' + fmtMXN(mejor.s) + ' (precios pactados sin IVA), igual o superior a 8,025 UMA ('
+            + fmtMXN(L_INM) + '; art. 7 del Reglamento): ' + mejor.l.map(function(a){ return textoInmueble(a.inm) + ' ' + fmtPrecioActo(a) + ', liquidada el ' + a.fecha_liq; }).join('; ') + '.' + nota,
+          monto_acumulado: mejor.s, monto_umbral: L_INM, num_operaciones: opsA.length,
+          ops_umbral: ids(opsA), ventana_desde: fechaMenosMeses(mejor.A, 6), ventana_hasta: mejor.A
         }));
-        if (cruza || (!conNueva && mejor.f !== fNueva)) toast('ALERTA UMBRAL SEMESTRAL Fr.XV: $' + mejor.suma.toLocaleString('es-MX') + ' al ' + mejor.f + ' (' + grupo.desc + ')', 'w');
-      }
-    } else {
-      // ── Fr. V: acumulado de seis meses ──
-      var mejorV = null;
-      anclas.forEach(function(f){
-        var l = ventana(f), s = l.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
-        if (!mejorV || s > mejorV.suma) mejorV = { f: f, ops: l, suma: s };
-      });
-      var propia = ventana(fNueva), sumPropia = propia.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
-      if (mejorV && mejorV.suma >= UMBRAL_INM) {
-        var cruzaV = mejorV.f === fNueva ? (mejorV.suma - nuevaMonto) < UMBRAL_INM : true;
-        crearAlertaUmbral(Object.assign({}, base, {
-          tipo: 'Umbral acumulado 6 meses Fr.V', nivel: 'Alto',
-          descripcion: 'Acumulado de los seis meses al ' + mejorV.f + ' (' + grupo.desc + ') de $' + mejorV.suma.toLocaleString('es-MX')
-            + ' supera umbral de $' + UMBRAL_INM.toLocaleString('es-MX') + ' (8,025 UMAs Fr.V); '
-            + mejorV.ops.length + (mejorV.ops.length === 1 ? ' operacion' : ' operaciones') + '.' + notaMXN,
-          monto_acumulado: mejorV.suma, monto_umbral: UMBRAL_INM, num_operaciones: mejorV.ops.length,
-          ops_umbral: ids(mejorV.ops), ventana_desde: fechaMenosMeses(mejorV.f, 6), ventana_hasta: mejorV.f
-        }));
-        if (cruzaV) toast('ALERTA UMBRAL Fr.V: acumulado $' + mejorV.suma.toLocaleString('es-MX') + ' al ' + mejorV.f + ' (' + grupo.desc + ')', 'w');
+        toast('ALERTA UMBRAL Fr.V: compraventas liquidadas en seis meses por ' + fmtMXN(mejor.s), 'w');
       } else {
-        var pct = Math.round(sumPropia / UMBRAL_INM * 100);
-        if (pct >= 70) toast('Aviso Fr.V: acumulado al ' + pct + '% del umbral ($' + sumPropia.toLocaleString('es-MX') + ', ' + grupo.desc + ')', 'w');
+        var propias = cand.filter(function(a){ return a.fecha_liq >= fechaMenosMeses(F, 6) && a.fecha_liq <= F; });
+        var sp = propias.reduce(function(t, a){ return t + a.precio_mxn; }, 0), pct = Math.round(sp / L_INM * 100);
+        if (pct >= 70) toast('Aviso Fr.V: compraventas liquidadas en seis meses al ' + pct + '% del umbral (' + fmtMXN(sp) + ')', 'w');
       }
+      fin(); return;
     }
-    if (cb) cb();
+
+    // ── Fr. XV: arrendamiento ──
+    var ctrs = contratosDe(cli);
+    var ctrDe = function(id){ return ctrs.filter(function(k){ return String(k.id) === String(id || ''); })[0] || null; };
+    var kAct = ctrDe(opNueva.contrato_id);
+    if (!kAct || !(parseFloat(kAct.renta) > 0)) {
+      toast('El contrato no tiene renta mensual: capturala en la pestana Contratos para evaluar los umbrales de aviso', 'w');
+      fin(); return;
+    }
+    var rAct = rentaMensualMXN(kAct, fNueva), descK = 'contrato ' + textoContrato(kAct);
+    // Aviso mensual: renta de 3,210 UMA o mas.
+    if (rAct >= L_ARI) {
+      var mes = mesDe(fNueva);
+      var delMes = noRep(delCliente.filter(function(o){ return String(o.contrato_id || '') === String(kAct.id) && mesDe(fechaOpUmbral(o)) === mes; }));
+      if (delMes.length) {
+        var pagMes = delMes.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
+        crearAlertaUmbral(Object.assign({}, base, {
+          tipo: 'Aviso Fr.XV: renta mensual de 3,210 UMA o mas', nivel: 'Alto',
+          grupo_id: 'MES:' + kAct.id + ':' + mes, grupo_desc: descK + ', ' + mes,
+          descripcion: 'La renta mensual del ' + descK + ' es de ' + fmtMXN(rAct) + ', igual o superior a 3,210 UMA (' + fmtMXN(L_ARI) + '): cada mensualidad es objeto de aviso, '
+            + 'con fecha de recepcion de los recursos (art. 5 del Reglamento). Pagos de ' + mes + ': ' + delMes.length + ' por ' + fmtMXN(pagMes) + '.' + nota,
+          monto_acumulado: rAct, monto_umbral: L_ARI, num_operaciones: delMes.length,
+          ops_umbral: ids(delMes), ventana_desde: mes + '-01', ventana_hasta: fNueva
+        }));
+        toast('AVISO Fr.XV: renta mensual de ' + fmtMXN(rAct) + ' (' + descK + ')', 'w');
+      }
+      fin(); return;
+    }
+    // Contrato no identificable: renta de 1,605 UMA o menos.
+    if (!(rAct > ID_ARI)) { fin(); return; }
+    // Acumulacion: pagos de los contratos identificables del cliente que no
+    // llegan solos al aviso mensual, en los seis meses anteriores a cada pago.
+    var acumulable = function(o){ var k = ctrDe(o.contrato_id); if (!k) return false; var r = rentaMensualMXN(k, fechaOpUmbral(o)); return r > ID_ARI && r < L_ARI; };
+    var pagos = noRep(delCliente.filter(acumulable));
+    var hastaA = fechaMenosMeses(fNueva, -6);
+    var anclasA = unicos([fNueva].concat(pagos.map(fechaOpUmbral).filter(function(x){ return x > fNueva && x <= hastaA; })));
+    var mejorA = null;
+    anclasA.forEach(function(A){
+      var d = fechaMenosMeses(A, 6), l = pagos.filter(function(o){ var x = fechaOpUmbral(o); return x >= d && x <= A; });
+      var s = l.reduce(function(t, o){ return t + subtotalOpMXN(o); }, 0);
+      if (!mejorA || s > mejorA.s) mejorA = { A: A, l: l, s: s };
+    });
+    if (mejorA && mejorA.s >= L_ARI) {
+      var porK = {};
+      mejorA.l.forEach(function(o){ var k = ctrDe(o.contrato_id), n = textoContrato(k); porK[n] = porK[n] || { t: 0, n: 0 }; porK[n].t += subtotalOpMXN(o); porK[n].n++; });
+      crearAlertaUmbral(Object.assign({}, base, {
+        tipo: 'Umbral acumulado semestral Fr.XV', nivel: 'Alto', grupo_id: 'CLI:ARI', grupo_desc: 'contratos identificables del cliente',
+        descripcion: 'Pagos de contratos con renta mensual superior a 1,605 UMA en los seis meses al ' + mejorA.A + ' suman ' + fmtMXN(mejorA.s)
+          + ', igual o superior a 3,210 UMA (' + fmtMXN(L_ARI) + '; art. 7 del Reglamento): '
+          + Object.keys(porK).map(function(n){ return n + ' ' + fmtMXN(porK[n].t) + ' (' + porK[n].n + (porK[n].n === 1 ? ' pago' : ' pagos') + ')'; }).join('; ') + '.' + nota,
+        monto_acumulado: mejorA.s, monto_umbral: L_ARI, num_operaciones: mejorA.l.length,
+        ops_umbral: ids(mejorA.l), ventana_desde: fechaMenosMeses(mejorA.A, 6), ventana_hasta: mejorA.A
+      }));
+      toast('ALERTA UMBRAL SEMESTRAL Fr.XV: ' + fmtMXN(mejorA.s) + ' al ' + mejorA.A, 'w');
+    }
+    fin();
   });
 }
 
@@ -15930,6 +16000,8 @@ function guardarLiq(idEx) {
     var ctrId = v('contrato_op');
     ctrOp = contratosDe(cliOp).filter(function(k){ return String(k.id) === String(ctrId); })[0] || null;
     if (!ctrOp) { toast('Elige el contrato al que corresponde el pago', 'w'); return; }
+    // La renta mensual decide si el contrato es identificable y si va a aviso (art. 31 del Reglamento).
+    if (!(parseFloat(ctrOp.renta) > 0)) { toast('El contrato ' + textoContrato(ctrOp) + ' no tiene renta mensual: capturala en la pestana Contratos de la ficha del cliente', 'w'); return; }
     // Si el cliente aun no tenia contratos registrados, se registra el de su perfil.
     if (ctrOp.por_omision && cliOp) {
       var k0 = JSON.parse(JSON.stringify(ctrOp)); delete k0.por_omision;
@@ -15943,6 +16015,8 @@ function guardarLiq(idEx) {
     var inmId = v('inmueble_op');
     inmOp = inmueblesDe(cliOp).filter(function(k){ return String(k.id) === String(inmId); })[0] || null;
     if (!inmOp) { toast('Elige el inmueble (fraccionamiento y lote) al que corresponde el pago', 'w'); return; }
+    // El precio pactado es el monto del acto para el umbral de aviso (art. 6 del Reglamento).
+    if (!(parseFloat(inmOp.precio) > 0)) { toast('El inmueble ' + textoInmueble(inmOp) + ' no tiene precio pactado: capturalo en la pestana Inmuebles de la ficha del cliente', 'w'); return; }
     if (inmOp.por_omision && cliOp) {
       var i0 = JSON.parse(JSON.stringify(inmOp)); delete i0.por_omision;
       cliOp.inmuebles_cv = [i0];
@@ -16369,7 +16443,7 @@ function procesarExcel(data, fraccion) {
     }
 
     // Leer datos desde la fila siguiente al encabezado
-    var registros = [], sinTCImp = [], sinInmImp = [], efCvImp = [], sinPaisImp = [], sinTerImp = [];
+    var registros = [], sinTCImp = [], sinInmImp = [], efCvImp = [], sinPaisImp = [], sinTerImp = [], sinRentaImp = [], sinPrecioImp = [];
     var sinTxt = function(a){ return a.join(', '); };
     for (var ri = headerRow + 1; ri < allRows.length; ri++) {
       var row = allRows[ri];
@@ -16427,9 +16501,13 @@ function procesarExcel(data, fraccion) {
       if (pagImp === 'TERCERO' && !celda('tercero')) { sinTerImp.push(ri + 1); continue; }
       var cliImp = null; App.clientes.forEach(function(c){ if (String(c.id) === String(idCli)) cliImp = c; });
       var ctrTxt = celda('contrato'), ctrImp = (fraccion === 'ARI' && cliImp) ? contratoPorTexto(cliImp, ctrTxt) : null;
+      // Arrendamiento: el contrato (o el unico del cliente) con su renta mensual.
+      if (fraccion === 'ARI' && cliImp && !ctrImp && !ctrTxt && contratosDe(cliImp).length === 1) ctrImp = contratosDe(cliImp)[0];
+      if (fraccion === 'ARI' && cliImp && !(ctrImp && parseFloat(ctrImp.renta) > 0)) { sinRentaImp.push(ri + 1); continue; }
       // Compraventa: el inmueble de la fila (o el unico del cliente); sin el, la fila no se importa.
       var inmImp = (fraccion !== 'ARI' && cliImp) ? inmueblePorTexto(cliImp, celda('inmueble')) : null;
       if (fraccion !== 'ARI' && cliImp && !inmImp) { sinInmImp.push(ri + 1); continue; }
+      if (fraccion !== 'ARI' && inmImp && !(parseFloat(inmImp.precio) > 0)) { sinPrecioImp.push(ri + 1); continue; }
       var monedaOp = codigoDeCelda(row[headerMap['moneda'] !== undefined ? headerMap['moneda'] : 4]) || '1';
       // Pais de procedencia: obligatorio (y distinto de Mexico) con 10 - Transferencia Internacional.
       var instImp = codigoDeCelda(row[headerMap['instrumento'] !== undefined ? headerMap['instrumento'] : 3]);
@@ -16485,6 +16563,8 @@ function procesarExcel(data, fraccion) {
         + ': su moneda no tiene cotizacion de Banxico y falta el tipo de cambio. Capturalo en la columna "Tipo de cambio" y vuelve a cargarlas. '
       : '')
       + (sinInmImp.length ? (sinInmImp.length === 1 ? 'La fila ' : 'Las filas ') + sinInmImp.join(', ') + ': falta el inmueble o no coincide con los del cliente (columna "Inmueble"). ' : '')
+      + (sinRentaImp.length ? (sinRentaImp.length === 1 ? 'La fila ' : 'Las filas ') + sinRentaImp.join(', ') + ': el contrato no se encontro o no tiene renta mensual (pestana Contratos); no se importaron. ' : '')
+      + (sinPrecioImp.length ? (sinPrecioImp.length === 1 ? 'La fila ' : 'Las filas ') + sinPrecioImp.join(', ') + ': el inmueble no tiene precio pactado (pestana Inmuebles); no se importaron. ' : '')
       + (sinTerImp.length ? (sinTerImp.length === 1 ? 'La fila ' : 'Las filas ') + sinTerImp.join(', ') + ': paga un tercero y falta su nombre (columna N); no se importaron. ' : '')
       + (sinPaisImp.length ? (sinPaisImp.length === 1 ? 'La fila ' : 'Las filas ') + sinPaisImp.join(', ') + ': transferencia internacional sin pais de procedencia (o con Mexico); no se importaron. ' : '')
       + (efCvImp.length ? (efCvImp.length === 1 ? 'La fila ' : 'Las filas ') + sinTxt(efCvImp) + ': con ese pago, el efectivo y metales preciosos del inmueble llegarian a 8,025 UMA o mas (art. 32 fr. I LFPIORPI); no se importaron. ' : '');
