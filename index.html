@@ -440,7 +440,24 @@ function initMsal() {
     document.getElementById('login-ct').innerHTML = '<div class="login-box"><div style="color:var(--rj);font-size:13px;margin-bottom:12px">No se pudo cargar la libreria de Microsoft. Verifica tu conexion a internet.</div><button class="btn" onclick="location.reload()">Recargar</button></div>';
     return false;
   }
-  if (!msalApp) msalApp = new msal.PublicClientApplication(MSAL_CONFIG);
+  if (!msalApp) {
+    // En telefono la sesion no se guarda de forma permanente: vive en
+    // sessionStorage y se pierde al cerrar la app o la pestana. Los restos de
+    // una sesion anterior guardada en localStorage se borran.
+    if (esTelefono()) {
+      MSAL_CONFIG.cache.cacheLocation = 'sessionStorage';
+      try {
+        var restos = [];
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i) || '';
+          if (/^msal\.|login\.windows\.net|login\.microsoftonline\.com/i.test(k) || k.indexOf(MSAL_CONFIG.auth.clientId) >= 0) restos.push(k);
+        }
+        restos.forEach(function(k){ localStorage.removeItem(k); });
+        localStorage.removeItem(INACT_CLAVE);
+      } catch(e) {}
+    }
+    msalApp = new msal.PublicClientApplication(MSAL_CONFIG);
+  }
   return true;
 }
 
@@ -489,6 +506,80 @@ var ROL_MODULOS = {
   supervisor: ['dashboard','clientes','alertas','avisos','operaciones','reportes','capacitacion'],
   usuario:    ['dashboard','clientes','operaciones','reportes','capacitacion']
 };
+
+// ── Telefono ─────────────────────────────────────────────────
+// Pantalla tactil cuyo lado corto mide menos de 600 px (las tabletas, de
+// 768 px o mas, se tratan como computadora).
+function esTelefono() {
+  try {
+    return !!(window.matchMedia && window.matchMedia('(pointer:coarse)').matches)
+      && Math.min(screen.width || 9999, screen.height || 9999) < 600;
+  } catch(e) { return false; }
+}
+// En telefono los asesores solo capturan clientes (alta, INE, documentos y
+// consulta de la ficha): sin Operaciones ni Reportes. Administradores y
+// supervisores consultan, resuelven alertas y aprueban, pero no cambian la
+// configuracion (UMA, modelo de riesgo, catalogos, roles).
+var MODULOS_FUERA_TELEFONO = {
+  admin:      ['config'],
+  supervisor: ['config'],
+  usuario:    ['operaciones','reportes']
+};
+function modulosPermitidos() {
+  var m = ROL_MODULOS[App.rol] || ROL_MODULOS.usuario;
+  if (!esTelefono()) return m;
+  var fuera = MODULOS_FUERA_TELEFONO[App.rol] || MODULOS_FUERA_TELEFONO.usuario;
+  return m.filter(function(x){ return fuera.indexOf(x) < 0; });
+}
+
+// ── Cierre de sesion por inactividad ─────────────────────────
+// 15 minutos sin uso en telefono y 60 en computadora; un minuto antes se
+// avisa. La ultima actividad se guarda para que tambien cuente al volver a
+// abrir la app (en telefono, solo mientras dure la sesion del navegador).
+var INACT_CLAVE = 'pld_ultima_actividad';
+var _inact = { ult: Date.now(), timer: null, avisado: false, guardado: 0 };
+function minutosInactividad() { return esTelefono() ? 15 : 60; }
+function almacenSesion() { try { return esTelefono() ? sessionStorage : localStorage; } catch(e) { return null; } }
+function marcarActividad() {
+  var ahora = Date.now();
+  _inact.ult = ahora; _inact.avisado = false;
+  if (ahora - _inact.guardado > 15000) {
+    _inact.guardado = ahora;
+    try { var a = almacenSesion(); if (a) a.setItem(INACT_CLAVE, String(ahora)); } catch(e) {}
+  }
+}
+// true si la sesion guardada ya rebaso el limite de inactividad.
+function sesionGuardadaVencida() {
+  try {
+    var a = almacenSesion(), v = a ? Number(a.getItem(INACT_CLAVE)) : 0;
+    return v > 0 && Date.now() - v >= minutosInactividad() * 60000;
+  } catch(e) { return false; }
+}
+function iniciarControlInactividad() {
+  _inact.guardado = 0; marcarActividad();
+  if (_inact.timer) return;
+  ['pointerdown','keydown','touchstart','wheel','scroll'].forEach(function(ev){
+    document.addEventListener(ev, marcarActividad, { passive: true, capture: true });
+  });
+  // Al volver a la app (el telefono suspende los temporizadores en segundo plano).
+  document.addEventListener('visibilitychange', function(){ if (!document.hidden) revisarInactividad(); });
+  _inact.timer = setInterval(revisarInactividad, 30000);
+}
+function revisarInactividad() {
+  if (!App.cuenta) return;
+  // Con varias pestanas abiertas cuenta la actividad mas reciente de cualquiera.
+  try { var a0 = almacenSesion(), g = a0 ? Number(a0.getItem(INACT_CLAVE)) : 0; if (g > _inact.ult) _inact.ult = g; } catch(e) {}
+  var lim = minutosInactividad() * 60000, pasado = Date.now() - _inact.ult;
+  if (pasado >= lim) {
+    clearInterval(_inact.timer); _inact.timer = null;
+    try { var a = almacenSesion(); if (a) a.removeItem(INACT_CLAVE); } catch(e) {}
+    try { toast('Sesion cerrada por inactividad (' + minutosInactividad() + ' minutos sin uso)', 'w'); } catch(e) {}
+    setTimeout(cerrarSesion, 1200);
+  } else if (pasado >= lim - 60000 && !_inact.avisado) {
+    _inact.avisado = true;
+    toast('Tu sesion se cerrara en un minuto por inactividad. Toca la pantalla o mueve el raton para seguir.', 'w');
+  }
+}
 
 // Dominios con acceso restringido a ciertas entidades
 // null = sin restricción (ve todas); array = solo esas entidades
@@ -1333,6 +1424,7 @@ window.onload = function() {
     }
     var cuentas = msalApp.getAllAccounts();
     if (!cuentas.length) return;
+    if (sesionGuardadaVencida()) { cerrarSesion(); return; }
     App.cuenta = cuentas[0];
     msalApp.acquireTokenSilent({scopes:SCOPES, account:App.cuenta, forceRefresh:true})
       .then(function(r){ App.token=r.accessToken; iniciarApp(); })
@@ -1740,6 +1832,7 @@ function cambiarEntidad() {
 //  INICIO APP
 // ================================================================
 function iniciarApp() {
+  iniciarControlInactividad();
   var nombre = App.cuenta.name || App.cuenta.username;
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('topbar').style.display = 'flex';
@@ -2226,7 +2319,7 @@ function rellenarColumnasIndexadas(lista, prog, cb, soloRevisar) {
 // ================================================================
 function renderNav() {
   var todos = [['dashboard','Inicio'],['clientes','Clientes'],['alertas','Alertas'],['avisos','Avisos'],['operaciones','Operaciones'],['reportes','Reportes'],['screening','Screening'],['capacitacion','Capacitacion'],['config','Config']];
-  var permitidos = ROL_MODULOS[App.rol] || ROL_MODULOS.usuario;
+  var permitidos = modulosPermitidos();
   var html = '';
   todos.forEach(function(i){
     if (permitidos.indexOf(i[0]) >= 0)
@@ -2283,6 +2376,7 @@ function irA(sec) {
   document.body.classList.remove('sb-open');
   document.querySelectorAll('.nav-item').forEach(function(e){e.classList.remove('on');});
   var el=document.getElementById('nav-'+sec); if(el) el.classList.add('on');
+  if (!tieneAcceso(sec)) { sinAcceso(sec); return; }
   ({dashboard:pgDash,clientes:pgClientes,alertas:pgAlertas,avisos:pgAvisos,operaciones:pgOps,reportes:pgReportes,screening:pgScreening,capacitacion:pgCapacitacion,config:pgConfig})[sec]();
 }
 function setSB(h){document.getElementById('sb-ct').innerHTML=h;}
@@ -4142,7 +4236,7 @@ function secHdr(txt){return '<div class="sec-hdr">'+txt+'</div>';}
 //  CONFIGURACIÓN DEL SISTEMA (UMA y parámetros)
 // ================================================================
 function pgConfig(sec) {
-  if (!tieneAcceso('config')) { sinAcceso(); return; }
+  if (!tieneAcceso('config')) { sinAcceso('config'); return; }
   sec = sec || 'sistema';
   setSB('<div class="sb-sec">Configuracion</div>'
     +'<div class="sb-item'+(sec==='sistema'?' on':'')+'" onclick="pgConfig(\'sistema\')">Parametros del sistema</div>'
@@ -4302,7 +4396,7 @@ function pgConfig(sec) {
 
 // ── Mantenimiento de datos (solo admin) ───────────────────────
 function pgConfigMantenimiento() {
-  if (App.rol !== 'admin') { sinAcceso(); return; }
+  if (App.rol !== 'admin' || !tieneAcceso('config')) { sinAcceso('config'); return; }
   // Una tarjeta por cada lista con columnas espejo (COLS_INDEXADAS).
   var tarjetas = Object.keys(COLS_INDEXADAS).map(function(l){
     var nombre = l.replace(/^PLD_/, '');
@@ -5800,10 +5894,16 @@ function cargarRolUsuario(emailNorm, emailAlt, cb) {
 }
 
 function tieneAcceso(modulo) {
-  return (ROL_MODULOS[App.rol] || ROL_MODULOS.usuario).indexOf(modulo) >= 0;
+  return modulosPermitidos().indexOf(modulo) >= 0;
 }
 
-function sinAcceso() {
+function sinAcceso(modulo) {
+  if (modulo && esTelefono() && (ROL_MODULOS[App.rol] || ROL_MODULOS.usuario).indexOf(modulo) >= 0) {
+    setMain('<div class="phdr"><div><div class="ptit">Disponible solo en computadora</div>'
+      +'<div class="psub">En el telefono este modulo no esta disponible</div></div></div>'
+      +'<div class="card"><div class="empty">Abre la app desde una computadora para usarlo.</div></div>');
+    return;
+  }
   setMain('<div class="phdr"><div><div class="ptit">Acceso restringido</div>'
     +'<div class="psub">Tu rol no tiene permiso para ver este módulo</div></div></div>'
     +'<div class="card"><div class="empty">Contacta al administrador del sistema para solicitar acceso.</div></div>');
@@ -5898,10 +5998,10 @@ function pgDash() {
   setSB('<div class="sb-sec">PLD/FT</div>'
     +'<div class="sb-item on">Panel general</div>'
     +'<div class="sb-item" onclick="irA(\'clientes\')">Clientes KYC</div>'
-    +'<div class="sb-item" onclick="irA(\'alertas\')">Alertas</div>'
-    +'<div class="sb-sec">Herramientas</div>'
-    +'<div class="sb-item" onclick="irA(\'reportes\')">Reportes</div>'
-    +'<div class="sb-item" onclick="irA(\'operaciones\')">Operaciones</div>');
+    +(tieneAcceso('alertas') ? '<div class="sb-item" onclick="irA(\'alertas\')">Alertas</div>' : '')
+    +((tieneAcceso('reportes') || tieneAcceso('operaciones')) ? '<div class="sb-sec">Herramientas</div>' : '')
+    +(tieneAcceso('reportes') ? '<div class="sb-item" onclick="irA(\'reportes\')">Reportes</div>' : '')
+    +(tieneAcceso('operaciones') ? '<div class="sb-item" onclick="irA(\'operaciones\')">Operaciones</div>' : ''));
   setMain('<div class="phdr"><div><div class="ptit">Panel principal</div><div class="psub">PLD/FT - LFPIORPI - Actividad vulnerable</div></div></div>'
     +'<div id="dash-b"><div class="empty"><div class="spin" style="margin:0 auto 10px"></div>Cargando indicadores...</div></div>');
 
@@ -8631,7 +8731,7 @@ function renderHistorialRiesgo(c) {
     }).join('');
     ct.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">'
       + '<span style="font-size:12px;color:var(--tx2)">' + ev.length + (ev.length === 1 ? ' evento' : ' eventos') + ' · art. 41 fr. IV: se conserva al menos diez anios</span>'
-      + '<button class="btn btn-sm" onclick="exportarHistorialXLS(\'' + c.id + '\')">&#x2193; Exportar historial (Excel)</button></div>'
+      + (tieneAcceso('reportes') ? '<button class="btn btn-sm" onclick="exportarHistorialXLS(\'' + c.id + '\')">&#x2193; Exportar historial (Excel)</button>' : '') + '</div>'
       + '<div class="twrap"><table><thead><tr><th>Fecha</th><th>Origen</th><th>Nivel</th><th>Motivo</th><th>Usuario</th></tr></thead>'
       + '<tbody>' + filas + '</tbody></table></div>';
     etiquetarTablasMovil(ct);
@@ -11347,7 +11447,7 @@ function altCategoria(a) {
 }
 
 function pgAlertas() {
-  if (!tieneAcceso('alertas')) { sinAcceso(); return; }
+  if (!tieneAcceso('alertas')) { sinAcceso('alertas'); return; }
   setSB('<div class="sb-sec">Alertas PLD/FT</div>'
     +'<div class="sb-item on" onclick="altVista(this,\'todas\',null)">Panel general</div>'
     +'<div class="sb-sec" style="margin-top:8px">Por categoría</div>'
@@ -12930,7 +13030,7 @@ function bannerPlenariaGafi() {
     + '<div style="flex:1;min-width:220px"><strong>Hubo plenaria del GAFI en ' + MESES_REVAL[p.mes - 1] + ' de ' + p.anio + '.</strong> '
     + 'Las listas vigentes son del ' + capEsc(corte) + '. '
     + (App.rol === 'admin' ? 'Confirma si cambiaron la lista gris o la de contramedidas.' : 'Un administrador debe confirmar las listas.') + '</div>'
-    + (App.rol === 'admin' ? '<button class="btn btn-sm" onclick="pgConfig(\'gafi\')">Confirmar las listas</button>' : '')
+    + (App.rol === 'admin' && tieneAcceso('config') ? '<button class="btn btn-sm" onclick="pgConfig(\'gafi\')">Confirmar las listas</button>' : '')
     + '</div>';
 }
 
@@ -12941,7 +13041,7 @@ function nombrePaisISO(iso) {
   return iso;
 }
 function pgConfigGafi() {
-  if (App.rol !== 'admin') { sinAcceso(); return; }
+  if (App.rol !== 'admin' || !tieneAcceso('config')) { sinAcceso('config'); return; }
   if (!CAT_JURIS) { setMain('<div class="empty">El catalogo de paises no se ha cargado. Intenta de nuevo en unos segundos.</div>'); cargarPaisesRiesgo(function(ok){ if (ok) pgConfigGafi(); }); return; }
   var cm = CAT_JURIS.categorias.gafi_contramedidas, vg = CAT_JURIS.categorias.gafi_vigilancia;
   GAFI_ED = { cm: (cm.paises || []).slice(), vg: (vg.paises || []).slice() };
@@ -13363,6 +13463,7 @@ function actividadesDe(ent) {
   return (e.actividades && e.actividades.length) ? e.actividades : FRACC_AVISO.map(function(f){ return f[0]; });
 }
 function guardarActividadesEntidad(entId) {
+  if (App.rol !== 'admin' || esTelefono()) { toast('La configuracion solo se cambia desde una computadora', 'w'); return; }
   var marcadas = FRACC_AVISO.map(function(f){ return f[0]; }).filter(function(k){
     var el = document.getElementById('act-' + entId + '-' + k); return el && el.checked;
   });
@@ -13382,7 +13483,7 @@ function renderControlMensual(avisos, alertas) {
     html += '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 6px;font-size:13px">'
       + '<strong>' + capEsc(ent.nombre || ent.id) + '</strong><span style="color:var(--tx3)">Actividades registradas ante el SAT:</span>'
       + FRACC_AVISO.map(function(fr){ return '<label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="act-' + ent.id + '-' + fr[0] + '"' + (acts.indexOf(fr[0]) >= 0 ? ' checked' : '') + '> ' + fr[1] + '</label>'; }).join('')
-      + (App.rol === 'admin' ? '<button class="btn btn-xs" onclick="guardarActividadesEntidad(\'' + ent.id + '\')">Guardar</button>' : '') + '</div>';
+      + (App.rol === 'admin' && !esTelefono() ? '<button class="btn btn-xs" onclick="guardarActividadesEntidad(\'' + ent.id + '\')">Guardar</button>' : '') + '</div>';
     FRACC_AVISO.filter(function(fr){ return acts.indexOf(fr[0]) >= 0; }).forEach(function(fr){
       var filas = meses.map(function(mes){
         var e = estadoMesControl(ent, fr[0], mes, avisos, alertas, regs);
@@ -13461,7 +13562,7 @@ function informesCerosPendientes(avisos, alertas, regs) {
 }
 
 function pgAvisos() {
-  if (!tieneAcceso('avisos')) { sinAcceso(); return; }
+  if (!tieneAcceso('avisos')) { sinAcceso('avisos'); return; }
   setSB('<div class="sb-sec">Avisos</div>'
     +'<div class="sb-item on av-todos">Todos</div>'
     +'<div class="sb-item av-nuevo">+ Nuevo aviso</div>'
@@ -14567,6 +14668,7 @@ function xmlPersona(cli, op) {
 //  MÓDULO OPERACIONES — Seguimiento por cliente con liquidaciones
 // ================================================================
 function pgOps() {
+  if (!tieneAcceso('operaciones')) { sinAcceso('operaciones'); return; }
   var fraccion = App._fraccionOps || 'INM';
   setSB('<div class="sb-sec">Operaciones</div>'
     +'<div class="sb-item on">Todas</div>'
@@ -17039,7 +17141,7 @@ function capAvisoSetup(){
 }
 
 function pgCapacitacion(){
-  if (!tieneAcceso('capacitacion')) { sinAcceso(); return; }
+  if (!tieneAcceso('capacitacion')) { sinAcceso('capacitacion'); return; }
   var v = App._capVista || 'biblioteca';
   var esAdmin = App.rol==='admin';
   setSB('<div class="sb-sec">Capacitacion</div>'
@@ -17428,6 +17530,7 @@ function capSeguimiento(){
 //  REPORTES
 // ================================================================
 function pgReportes() {
+  if (!tieneAcceso('reportes')) { sinAcceso('reportes'); return; }
   setSB('<div class="sb-sec">Reportes</div>'
     +'<div class="sb-item on" onclick="pgReportes()">Centro de reportes</div>'
     +'<div class="sb-sec">Exportar</div>'
@@ -19204,7 +19307,7 @@ function scrActualizarEstadoListas() {
 
 // ── Pantalla principal del módulo ─────────────────────────────
 function pgScreening() {
-  if (!tieneAcceso('screening')) { sinAcceso(); return; }
+  if (!tieneAcceso('screening')) { sinAcceso('screening'); return; }
   var sbHtml = '<div class="sb-sec">Screening</div>'
     + '<div class="sb-item on" onclick="scrVistaManual()">Búsqueda manual</div>'
     + '<div class="sb-item" onclick="scrVistaCliente()">Por cliente</div>'
