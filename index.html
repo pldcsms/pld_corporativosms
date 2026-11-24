@@ -11276,9 +11276,17 @@ function revisarPlazosAvisos() {
       ? (todas || []).filter(function(a){ return a.entidad_id === App.entidadActual.id || !a.entidad_id; })
       : filtrarPermitidas(todas || []);
     var r = avisosPorVencer(t, 5), ah = (t || []).filter(function(a){ return a.aviso24 && !avisoPresentado(a) && a.estatus_atencion !== 'Cerrada'; });
-    if (r.vencidos.length || r.proximos.length || ah.length)
-      toast('Avisos pendientes: ' + [r.vencidos.length ? r.vencidos.length + ' vencido(s)' : '', r.proximos.length ? r.proximos.length + ' vence(n) en 5 dias o menos' : '',
-        ah.length ? ah.length + ' aviso(s) de 24 horas sin presentar' : ''].filter(Boolean).join(', ') + '. Revisalos en Alertas.', r.vencidos.length || ah.length ? 'e' : 'w');
+    // Informes en ceros del mes anterior, a partir del dia 10 (vencen el 17).
+    spGet('PLD_Operaciones', function(avisos){
+      spGet('PLD_Config', function(cfg){
+        var item = (cfg || []).filter(function(c){ return c.clave === CLAVE_INF_CEROS; })[0] || null;
+        var ic = Number(hoy().substring(8, 10)) >= 10 ? informesCerosPendientes(avisos || [], t || [], (item && item.registros) || {}) : { n: 0 };
+        if (r.vencidos.length || r.proximos.length || ah.length || ic.n)
+          toast('Avisos pendientes: ' + [r.vencidos.length ? r.vencidos.length + ' vencido(s)' : '', r.proximos.length ? r.proximos.length + ' vence(n) en 5 dias o menos' : '',
+            ah.length ? ah.length + ' aviso(s) de 24 horas sin presentar' : '', ic.n ? ic.n + ' informe(s) en ceros de ' + ic.mes + ' por presentar' : ''].filter(Boolean).join(', ')
+            + '. Revisalos en Alertas y en Avisos > Control mensual.', r.vencidos.length || ah.length ? 'e' : 'w');
+      });
+    });
   });
 }
 
@@ -13290,6 +13298,144 @@ function cargarConfigUMA() {
   });
 }
 
+// ── CONTROL MENSUAL DE AVISOS E INFORME EN CEROS ─────────────
+// Art. 25 de las Reglas: el mes en que una actividad vulnerable no tuvo
+// operaciones objeto de aviso se presenta un informe que lo dice (en el XML,
+// el informe sin ningun <aviso>, que el esquema de la UIF admite). Mismo
+// plazo que los avisos: el dia 17 del mes siguiente (art. 23 LFPIORPI). El
+// tablero cruza, por entidad, fraccion y mes, los avisos de la app, las
+// alertas de aviso pendientes y los informes en ceros registrados (en
+// PLD_Config, clave informes_ceros; cada registro queda en la bitacora).
+var CLAVE_INF_CEROS = 'informes_ceros';
+var FRACC_AVISO = [['INM', 'Fr. V - Compraventa', 'inm', 'inm.xsd'], ['ARI', 'Fr. XV - Arrendamiento', 'ari', 'ari.xsd']];
+function mesesControl(n) {
+  var out = [], d = new Date(hoy() + 'T12:00:00');
+  for (var i = 0; i < n; i++) { out.push(d.getFullYear() + '-' + pad(d.getMonth() + 1)); d.setMonth(d.getMonth() - 1); }
+  return out;
+}
+function entidadesControl() {
+  if (App.entidadActual && App.entidadActual.id !== 'TODAS') return ENTIDADES.filter(function(e){ return e.id === App.entidadActual.id; });
+  return filtrarPermitidas(ENTIDADES.map(function(e){ return Object.assign({ entidad_id: e.id }, e); }));
+}
+function pgControlMensual() {
+  document.querySelectorAll('#sb-ct .sb-item').forEach(function(e){ e.classList.remove('on'); });
+  setMain('<div class="phdr"><div><div class="ptit">Control mensual de avisos</div>'
+    + '<div class="psub">Por entidad, fraccion y mes: avisos presentados, avisos pendientes e informe en ceros (art. 25 de las Reglas). Plazo: dia 17 del mes siguiente.</div></div>'
+    + '<button class="btn" onclick="pgAvisos()">Volver</button></div>'
+    + '<div id="ctl-ct"><div class="empty"><div class="spin" style="margin:0 auto"></div></div></div>');
+  spGet('PLD_Operaciones', function(avisos){
+    spGet('PLD_Alertas', function(alertas){
+      spGet('PLD_Config', function(cfg){
+        var item = (cfg || []).filter(function(c){ return c.clave === CLAVE_INF_CEROS; })[0] || null;
+        App._infCeros = { item: item, registros: (item && item.registros) || {} };
+        renderControlMensual(avisos || [], alertas || []);
+      });
+    });
+  });
+}
+// Estado de un mes: aviso enviado, aviso pendiente, informe en ceros
+// presentado o pendiente, o mes en curso.
+function estadoMesControl(ent, frac, mes, avisos, alertas, regs) {
+  var mesHoy = hoy().substring(0, 7), lim = limiteAviso17(mes + '-01');
+  var delMes = avisos.filter(function(o){ return (o.fraccion || 'INM') === frac && (o.entidad_id || '') === ent.id && String(o.fecha_operacion || '').substring(0, 7) === mes; });
+  var enviados = delMes.filter(function(o){ return o.estatus_aviso === 'Enviado'; }).length;
+  var sinEnviar = delMes.length - enviados;
+  var alertasPend = alertas.filter(function(a){
+    var p = plazoAviso(a);
+    return p && !p.presentado && !p.cerrada && (a.fraccion || 'INM') === frac && (!a.entidad_id || a.entidad_id === ent.id) && p.acto.substring(0, 7) === mes;
+  }).length;
+  var reg = regs[ent.id + '|' + frac + '|' + mes] || null;
+  var e = { mes: mes, limite: lim, enviados: enviados, sinEnviar: sinEnviar, alertasPend: alertasPend, informe: reg };
+  if (enviados) e.estado = 'AVISOS';
+  else if (sinEnviar || alertasPend) e.estado = 'AVISO_PENDIENTE';
+  else if (reg) e.estado = 'CEROS_OK';
+  else if (mes >= mesHoy) e.estado = 'EN_CURSO';
+  else e.estado = 'CEROS_PENDIENTE';
+  e.vencido = (e.estado === 'CEROS_PENDIENTE' || e.estado === 'AVISO_PENDIENTE') && hoy() > lim;
+  return e;
+}
+function renderControlMensual(avisos, alertas) {
+  var ct = document.getElementById('ctl-ct'); if (!ct) return;
+  var regs = App._infCeros.registros, meses = mesesControl(12), ents = entidadesControl();
+  var html = '';
+  ents.forEach(function(ent){
+    FRACC_AVISO.forEach(function(fr){
+      var filas = meses.map(function(mes){
+        var e = estadoMesControl(ent, fr[0], mes, avisos, alertas, regs);
+        var pill = {
+          AVISOS: '<span class="pill p-vd">' + e.enviados + (e.enviados === 1 ? ' aviso enviado' : ' avisos enviados') + '</span>',
+          AVISO_PENDIENTE: '<span class="pill ' + (e.vencido ? 'p-rj' : 'p-am') + '">Aviso por presentar' + (e.vencido ? ' (vencido)' : '') + '</span>',
+          CEROS_OK: '<span class="pill p-vd">Informe en ceros presentado</span>',
+          EN_CURSO: '<span class="pill p-gr">Mes en curso</span>',
+          CEROS_PENDIENTE: '<span class="pill ' + (e.vencido ? 'p-rj' : 'p-am') + '">Informe en ceros pendiente' + (e.vencido ? ' (vencido)' : '') + '</span>'
+        }[e.estado];
+        var det = [e.sinEnviar ? e.sinEnviar + ' aviso(s) sin enviar' : '', e.alertasPend ? e.alertasPend + ' alerta(s) de aviso sin presentar' : '',
+                   e.informe ? 'Acuse ' + capEsc(e.informe.folio || '') + ' del ' + capEsc(e.informe.fecha_envio || '') : ''].filter(Boolean).join(' · ');
+        var acc = e.estado === 'CEROS_PENDIENTE'
+          ? '<button class="btn btn-xs" onclick="xmlInformeCeros(\'' + ent.id + '\',\'' + fr[0] + '\',\'' + mes + '\')">XML en ceros</button> '
+            + '<button class="btn btn-xs btn-p" onclick="registrarInformeCeros(\'' + ent.id + '\',\'' + fr[0] + '\',\'' + mes + '\')">Registrar presentacion</button>'
+          : e.estado === 'CEROS_OK' ? '<button class="btn btn-xs" onclick="xmlInformeCeros(\'' + ent.id + '\',\'' + fr[0] + '\',\'' + mes + '\')">XML en ceros</button>' : '';
+        return '<tr><td style="white-space:nowrap">' + mes + '</td><td>' + pill + (det ? '<div style="font-size:11px;color:var(--tx3);margin-top:2px">' + det + '</div>' : '') + '</td>'
+          + '<td style="font-size:12px;white-space:nowrap">' + (e.estado === 'EN_CURSO' ? '' : e.limite) + '</td><td style="white-space:nowrap">' + acc + '</td></tr>';
+      }).join('');
+      html += '<div class="card"><div class="card-h"><span class="card-t">' + capEsc(ent.nombre || ent.id) + ' · ' + fr[1] + '</span>'
+        + '<span style="font-size:12px;color:var(--tx3)">RFC ' + capEsc(ent.rfc || 'sin configurar') + '</span></div>'
+        + '<div class="twrap"><table><thead><tr><th>Mes</th><th>Estado</th><th>Plazo</th><th></th></tr></thead><tbody>' + filas + '</tbody></table></div></div>';
+    });
+  });
+  ct.innerHTML = '<div class="alerta-banner" style="margin-bottom:12px"><span>Si en un mes no hubo operaciones objeto de aviso, se presenta el informe en ceros de esa actividad (art. 25 de las Reglas). '
+    + 'Genera el XML, presentalo en el portal del SAT y registra aqui la fecha y el folio del acuse. Si la entidad no tiene registrada una de las dos actividades, ignora su tabla.</span></div>' + html;
+}
+function xmlInformeCeros(entId, frac, mes) {
+  var ent = ENTIDADES.filter(function(e){ return e.id === entId; })[0] || {};
+  var fr = FRACC_AVISO.filter(function(x){ return x[0] === frac; })[0];
+  var rfc = String(ent.rfc || '').toUpperCase().replace(/[^A-ZÑ&0-9]/g, '').substring(0, 13);
+  if (rfc.length < 12) { toast('El RFC de ' + (ent.nombre || entId) + ' no esta configurado o es invalido: completalo en Configuracion → Entidades', 'e'); return; }
+  var xml = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    + '<archivo xsi:schemaLocation="http://www.uif.shcp.gob.mx/recepcion/' + fr[2] + ' ' + fr[3] + '"'
+    + ' xmlns="http://www.uif.shcp.gob.mx/recepcion/' + fr[2] + '"'
+    + ' xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+    + '  <informe>\n'
+    + '    <mes_reportado>' + mes.replace('-', '') + '</mes_reportado>\n'
+    + '    <sujeto_obligado>\n'
+    + '      <clave_sujeto_obligado>' + rfc + '</clave_sujeto_obligado>\n'
+    + '      <clave_actividad>' + frac + '</clave_actividad>\n'
+    + '    </sujeto_obligado>\n'
+    + '  </informe>\n'
+    + '</archivo>\n';
+  descargarArchivo(xml, 'InformeCeros_' + frac + '_' + rfc + '_' + mes.replace('-', '') + '.xml', 'application/xml');
+  registrarBitacora({ grupo: 'Avisos', accion: 'XML de informe en ceros generado', resumen: (ent.nombre || entId) + ' · ' + fr[1] + ' · ' + mes });
+  toast('XML del informe en ceros generado (' + fr[1] + ', ' + mes + ')', 's');
+}
+function registrarInformeCeros(entId, frac, mes) {
+  var fecha = prompt('Fecha en que se presento el informe en ceros (AAAA-MM-DD):', hoy());
+  if (fecha === null) return;
+  fecha = String(fecha).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) { toast('Escribe la fecha como AAAA-MM-DD', 'w'); return; }
+  var folio = prompt('Folio del acuse del SAT:', '');
+  if (folio === null) return;
+  folio = String(folio).trim();
+  if (!folio) { toast('Escribe el folio del acuse', 'w'); return; }
+  var reg = { fecha_envio: fecha, folio: folio, usuario: App.cuenta ? App.cuenta.username : '', registrado: new Date().toISOString() };
+  spGet('PLD_Config', function(cfg){
+    var item = (cfg || []).filter(function(c){ return c.clave === CLAVE_INF_CEROS; })[0] || null;
+    var registros = JSON.parse(JSON.stringify((item && item.registros) || {}));
+    registros[entId + '|' + frac + '|' + mes] = reg;
+    var datos = { clave: CLAVE_INF_CEROS, Title: CLAVE_INF_CEROS, registros: registros };
+    bitCtx({ grupo: 'Avisos', accion: 'Informe en ceros presentado', resumen: entId + ' · ' + frac + ' · ' + mes + ' · folio ' + folio + ' del ' + fecha });
+    var listo = function(){ toast('Informe en ceros registrado', 's'); pgControlMensual(); };
+    if (item) spUpdate('PLD_Config', item.id, datos, listo); else spCreate('PLD_Config', datos, listo);
+  });
+}
+// Informes en ceros del mes anterior por presentar (para el aviso al entrar).
+function informesCerosPendientes(avisos, alertas, regs) {
+  var mes = mesesControl(2)[1], n = 0;
+  entidadesControl().forEach(function(ent){
+    FRACC_AVISO.forEach(function(fr){ if (estadoMesControl(ent, fr[0], mes, avisos, alertas, regs).estado === 'CEROS_PENDIENTE') n++; });
+  });
+  return { mes: mes, n: n };
+}
+
 function pgAvisos() {
   if (!tieneAcceso('avisos')) { sinAcceso(); return; }
   setSB('<div class="sb-sec">Avisos</div>'
@@ -13298,7 +13444,9 @@ function pgAvisos() {
     +'<div class="sb-sec">Filtrar estatus</div>'
     +'<div class="sb-item" data-filtro="Borrador">Borradores</div>'
     +'<div class="sb-item" data-filtro="Listo">Listos</div>'
-    +'<div class="sb-item" data-filtro="Enviado">Enviados</div>');
+    +'<div class="sb-item" data-filtro="Enviado">Enviados</div>'
+    +'<div class="sb-sec">Control</div>'
+    +'<div class="sb-item" onclick="pgControlMensual()">Control mensual e informe en ceros</div>');
 
   var fraccion = App._fraccionAvisos || 'INM';
   setMain('<div class="phdr">'
