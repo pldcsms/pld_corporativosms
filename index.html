@@ -12179,7 +12179,9 @@ function crearAvisoDesdeAlerta(alertaId) {
         fraccion: fraccion,
         id_cliente_ref: cli ? cli.id : (a.id_cliente_ref||''),
         nombre_cliente: cli ? nombreCliente(cli) : (a.nombre_cliente||''),
-        tipo_alerta: a.aviso24 ? (a.motivo_24h === 'LISTA' ? '9999' : '3105') : '3114',  // 24 h: persona en lista u otra alerta; sospecha o indicios
+        // Aviso por umbral: 100 "Sin alerta" (el aviso se debe al monto, no a una
+        // senal de alerta). Aviso de 24 horas: 9999 persona en lista; 3105 sospecha o indicios.
+        tipo_alerta: a.aviso24 ? (a.motivo_24h === 'LISTA' ? '9999' : '3105') : '100',
         descripcion_alerta: a.descripcion || ('Umbral superado: $'+(a.monto_acumulado||0).toLocaleString('es-MX')),
         prioridad: a.aviso24 ? '2' : '1',                 // 2 = urgente (aviso de 24 horas)
         tipo_operacion: fraccion==='ARI' ? '1501' : '501',
