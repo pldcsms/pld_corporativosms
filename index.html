@@ -13356,12 +13356,34 @@ function estadoMesControl(ent, frac, mes, avisos, alertas, regs) {
   e.vencido = (e.estado === 'CEROS_PENDIENTE' || e.estado === 'AVISO_PENDIENTE') && hoy() > lim;
   return e;
 }
+// Actividades que la entidad tiene registradas ante el SAT (por omision,
+// las dos). Solo esas aparecen en el control mensual y en el aviso al entrar.
+function actividadesDe(ent) {
+  var e = ENTIDADES.filter(function(x){ return x.id === ent.id; })[0] || ent;
+  return (e.actividades && e.actividades.length) ? e.actividades : FRACC_AVISO.map(function(f){ return f[0]; });
+}
+function guardarActividadesEntidad(entId) {
+  var marcadas = FRACC_AVISO.map(function(f){ return f[0]; }).filter(function(k){
+    var el = document.getElementById('act-' + entId + '-' + k); return el && el.checked;
+  });
+  if (!marcadas.length) { toast('Marca al menos una actividad registrada', 'w'); return; }
+  var e = ENTIDADES.filter(function(x){ return x.id === entId; })[0];
+  if (!e) return;
+  e.actividades = marcadas;
+  bitCtx({ grupo: 'Configuracion', accion: 'Actividades registradas de la entidad', resumen: (e.nombre || entId) + ': ' + marcadas.join(', ') });
+  guardarEntidades(function(){ toast('Actividades de ' + (e.nombre || entId) + ' guardadas', 's'); pgControlMensual(); });
+}
 function renderControlMensual(avisos, alertas) {
   var ct = document.getElementById('ctl-ct'); if (!ct) return;
   var regs = App._infCeros.registros, meses = mesesControl(12), ents = entidadesControl();
   var html = '';
   ents.forEach(function(ent){
-    FRACC_AVISO.forEach(function(fr){
+    var acts = actividadesDe(ent);
+    html += '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 6px;font-size:13px">'
+      + '<strong>' + capEsc(ent.nombre || ent.id) + '</strong><span style="color:var(--tx3)">Actividades registradas ante el SAT:</span>'
+      + FRACC_AVISO.map(function(fr){ return '<label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="act-' + ent.id + '-' + fr[0] + '"' + (acts.indexOf(fr[0]) >= 0 ? ' checked' : '') + '> ' + fr[1] + '</label>'; }).join('')
+      + (App.rol === 'admin' ? '<button class="btn btn-xs" onclick="guardarActividadesEntidad(\'' + ent.id + '\')">Guardar</button>' : '') + '</div>';
+    FRACC_AVISO.filter(function(fr){ return acts.indexOf(fr[0]) >= 0; }).forEach(function(fr){
       var filas = meses.map(function(mes){
         var e = estadoMesControl(ent, fr[0], mes, avisos, alertas, regs);
         var pill = {
@@ -13386,7 +13408,7 @@ function renderControlMensual(avisos, alertas) {
     });
   });
   ct.innerHTML = '<div class="alerta-banner" style="margin-bottom:12px"><span>Si en un mes no hubo operaciones objeto de aviso, se presenta el informe en ceros de esa actividad (art. 25 de las Reglas). '
-    + 'Genera el XML, presentalo en el portal del SAT y registra aqui la fecha y el folio del acuse. Si la entidad no tiene registrada una de las dos actividades, ignora su tabla.</span></div>' + html;
+    + 'Genera el XML, presentalo en el portal del SAT y registra aqui la fecha y el folio del acuse. Desmarca las actividades que la entidad no tiene registradas para ocultar su tabla.</span></div>' + html;
 }
 function xmlInformeCeros(entId, frac, mes) {
   var ent = ENTIDADES.filter(function(e){ return e.id === entId; })[0] || {};
@@ -13433,7 +13455,7 @@ function registrarInformeCeros(entId, frac, mes) {
 function informesCerosPendientes(avisos, alertas, regs) {
   var mes = mesesControl(2)[1], n = 0;
   entidadesControl().forEach(function(ent){
-    FRACC_AVISO.forEach(function(fr){ if (estadoMesControl(ent, fr[0], mes, avisos, alertas, regs).estado === 'CEROS_PENDIENTE') n++; });
+    FRACC_AVISO.filter(function(fr){ return actividadesDe(ent).indexOf(fr[0]) >= 0; }).forEach(function(fr){ if (estadoMesControl(ent, fr[0], mes, avisos, alertas, regs).estado === 'CEROS_PENDIENTE') n++; });
   });
   return { mes: mes, n: n };
 }

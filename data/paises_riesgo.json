@@ -1,6 +1,6 @@
 {
   "_comentario": "Catalogo de jurisdicciones de riesgo para el modelo EBR. Los paises se identifican por codigo ISO 3166-1 alfa-2, que es lo que devuelve paisISO() en la app. Cada categoria trae su propia fuente y fecha de corte porque se actualizan por separado. Este archivo recoge datos publicos de sus fuentes originales; no reproduce ningun documento reservado.",
-  "actualizado": "2026-11-06",
+  "actualizado": "2026-11-24",
   "categorias": {
     "gafi_contramedidas": {
       "etiqueta": "GAFI: llamado a aplicar contramedidas",
@@ -22,15 +22,15 @@
     },
     "csnu_sanciones": {
       "etiqueta": "Sanciones financieras del Consejo de Seguridad de la ONU",
-      "descripcion": "Paises con un regimen de sanciones financieras dirigidas vigente del Consejo de Seguridad. Guinea-Bissau (resolucion 2048) queda fuera a proposito: ese comite no impone sanciones financieras, asi que sus designaciones no llevan congelamiento de activos.",
+      "descripcion": "Paises con un regimen de sanciones financieras dirigidas vigente del Consejo de Seguridad. Guinea-Bissau (resolucion 2048) queda fuera a proposito: ese comite no impone sanciones financieras, asi que sus designaciones no llevan congelamiento de activos. Libano (1636) tampoco: el comite no tiene designaciones. Irak (1518) se conserva por decision del oficial de cumplimiento. Verificado contra la pagina de sanciones del Consejo de Seguridad el 24 de noviembre de 2026: 15 regimenes vigentes, sin altas ni bajas desde marzo.",
       "fuente": "Resoluciones del Consejo de Seguridad de las Naciones Unidas",
       "url": "https://main.un.org/securitycouncil/es/sanctions/information",
-      "fecha_corte": "2026-03-31",
+      "fecha_corte": "2026-11-24",
       "revision": "Cuando el Consejo de Seguridad crea o levanta un regimen",
       "paises": ["AF", "CF", "CD", "HT", "IQ", "IR", "KP", "LY", "SO", "SD", "SS", "YE"],
       "resoluciones": {
         "AF": "1988 (2011), Taliban",
-        "CF": "2127 (2013)",
+        "CF": "2745 (2024), que sustituyo al comite 2127 (2013)",
         "CD": "1533 (2004)",
         "HT": "2653 (2022)",
         "IQ": "1518 (2003)",
