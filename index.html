@@ -1816,6 +1816,8 @@ function iniciarApp() {
         // Sin la lista del historial no se guardan los cambios de nivel (art. 41 fr. IV).
         if (!App.listas[LISTA_HIST] && App.rol === 'admin') setTimeout(function(){ avisoFaltaHistorial(); }, 3000);
         if (!App.listas[LISTA_BIT] && App.rol === 'admin') setTimeout(function(){ avisoFaltaBitacora(); }, 5000);
+        // Avisos vencidos o por vencer (dia 17) y avisos de 24 horas sin presentar.
+        setTimeout(function(){ try { revisarPlazosAvisos(); } catch(e){ console.warn('[AVISOS] plazos', e); } }, 7000);
       });
       }); // cargarRolUsuario
     });
@@ -11224,6 +11226,62 @@ function crearAviso24h(o, cb) {
     crear();
   });
 }
+// ── Plazo de presentacion de los avisos por umbral ──
+// A mas tardar el dia 17 del mes siguiente al de la operacion que le dio
+// origen (art. 23 de la LFPIORPI). La fecha es la que la alerta guardo al
+// crearse; las alertas anteriores usan la de su ventana o la de registro.
+function fechaActoAlerta(a) {
+  var f = String(a.fecha_acto_aviso || a.ventana_hasta || a.fecha_registro || '').substring(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(f) ? f : '';
+}
+function limiteAviso17(f) {
+  var d = new Date(f + 'T12:00:00');
+  if (isNaN(d.getTime())) return '';
+  var l = new Date(d.getFullYear(), d.getMonth() + 1, 17, 12);
+  return l.getFullYear() + '-' + pad(l.getMonth() + 1) + '-' + pad(l.getDate());
+}
+function avisoPresentado(a) { return !!(a.fecha_envio_aviso || a.folio_acuse || a.estatus_atencion === 'Reportada'); }
+// null si la alerta no lleva a un aviso con plazo del dia 17.
+function plazoAviso(a) {
+  if (!a || a.aviso24 || altCategoria(a) !== 'Umbral') return null;
+  var f = fechaActoAlerta(a), lim = f ? limiteAviso17(f) : '';
+  if (!lim) return null;
+  var dias = Math.round((new Date(lim + 'T12:00:00') - new Date(hoy() + 'T12:00:00')) / 86400000);
+  return { acto: f, limite: lim, dias: dias, presentado: avisoPresentado(a), cerrada: a.estatus_atencion === 'Cerrada' };
+}
+function htmlPlazoAviso(a) {
+  var p = plazoAviso(a);
+  if (!p || p.cerrada) return '';
+  if (p.presentado) return '<span class="pill p-vd" style="font-size:10px">Aviso presentado</span>';
+  var tit = ' title="Operacion del ' + p.acto + '; plazo: dia 17 del mes siguiente (art. 23 LFPIORPI)"';
+  if (p.dias < 0) return '<span class="pill p-rj" style="font-size:10px"' + tit + '>Aviso vencido el ' + p.limite + '</span>';
+  return '<span class="pill ' + (p.dias <= 5 ? 'p-rj' : p.dias <= 10 ? 'p-am' : 'p-gr') + '" style="font-size:10px"' + tit + '>Aviso vence el ' + p.limite
+    + (p.dias === 0 ? ' (hoy)' : ' (' + p.dias + (p.dias === 1 ? ' dia' : ' dias') + ')') + '</span>';
+}
+// Avisos por umbral sin presentar: vencidos y los que vencen en los proximos dias.
+function avisosPorVencer(alertas, dias) {
+  var r = { vencidos: [], proximos: [] };
+  (alertas || []).forEach(function(a){
+    var p = plazoAviso(a);
+    if (!p || p.presentado || p.cerrada) return;
+    if (p.dias < 0) r.vencidos.push(a); else if (p.dias <= (dias || 5)) r.proximos.push(a);
+  });
+  return r;
+}
+// Al entrar (administradores): aviso si hay avisos vencidos o por vencer.
+function revisarPlazosAvisos() {
+  if (App.rol !== 'admin') return;
+  spGet('PLD_Alertas', function(todas){
+    var t = App.entidadActual && App.entidadActual.id !== 'TODAS'
+      ? (todas || []).filter(function(a){ return a.entidad_id === App.entidadActual.id || !a.entidad_id; })
+      : filtrarPermitidas(todas || []);
+    var r = avisosPorVencer(t, 5), ah = (t || []).filter(function(a){ return a.aviso24 && !avisoPresentado(a) && a.estatus_atencion !== 'Cerrada'; });
+    if (r.vencidos.length || r.proximos.length || ah.length)
+      toast('Avisos pendientes: ' + [r.vencidos.length ? r.vencidos.length + ' vencido(s)' : '', r.proximos.length ? r.proximos.length + ' vence(n) en 5 dias o menos' : '',
+        ah.length ? ah.length + ' aviso(s) de 24 horas sin presentar' : ''].filter(Boolean).join(', ') + '. Revisalos en Alertas.', r.vencidos.length || ah.length ? 'e' : 'w');
+  });
+}
+
 // Plazo de un aviso de 24 horas: presentado, vencido o lo que falta.
 function htmlPlazo24h(a) {
   if (!a || !a.aviso24) return '';
@@ -11333,6 +11391,13 @@ function cargarAlertas(modo, valor) {
       var prf  = todas.filter(function(a){ return altCategoria(a)==='Perfil'; });
       var man  = todas.filter(function(a){ return altCategoria(a)==='Manual'; });
       var a24  = todas.filter(function(a){ return altCategoria(a)==='Aviso 24 horas'; });
+      var pv   = avisosPorVencer(todas, 5);
+      var a24p = a24.filter(function(a){ return !avisoPresentado(a) && a.estatus_atencion !== 'Cerrada'; });
+      var bannerPlazos = (pv.vencidos.length || pv.proximos.length || a24p.length)
+        ? '<div class="alerta-banner" style="margin-bottom:12px;background:var(--rj3);color:var(--rj);border-color:var(--rj)"><span><strong>Avisos por presentar:</strong> '
+          + [pv.vencidos.length ? pv.vencidos.length + ' vencido(s)' : '', pv.proximos.length ? pv.proximos.length + ' vence(n) en 5 dias o menos' : '', a24p.length ? a24p.length + ' aviso(s) de 24 horas' : ''].filter(Boolean).join(' · ')
+          + '. Los avisos por umbral se presentan a mas tardar el dia 17 del mes siguiente a la operacion (art. 23 LFPIORPI).</span></div>'
+        : '';
       var apr  = todas.filter(function(a){ return a.requiere_aprobacion; });
       var pend = todas.filter(function(a){ return (a.estatus_atencion||'Pendiente')==='Pendiente'; });
 
@@ -11355,7 +11420,7 @@ function cargarAlertas(modo, valor) {
         return new Date(b.fecha_registro||0) - new Date(a.fecha_registro||0);
       }).slice(0, 15);
 
-      el.innerHTML = '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">'
+      el.innerHTML = bannerPlazos + '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">'
         + card('Total', todas, 'var(--tx2)', '📋')
         + card('Pendientes', pend, 'var(--am)', '⏳')
         + card('Aprobación', apr, 'var(--mo)', '🔒')
@@ -11411,7 +11476,7 @@ function altTabla(lista) {
       +'<td style="font-size:12px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(a.tipo||'-')+'</td>'
       +'<td>'+(a.fraccion?'<span class="pill '+(a.fraccion==='ARI'?'p-mo':'p-az')+'" style="font-size:10px">Fr.'+(a.fraccion==='ARI'?'XV':'V')+'</span>':'-')+'</td>'
       +'<td><span class="pill '+nc+'">'+(a.nivel||'-')+'</span></td>'
-      +'<td><span class="pill '+esc+'">'+(a.estatus_atencion||'Pendiente')+'</span>'+(a.aviso24?' '+htmlPlazo24h(a):'')+'</td>'
+      +'<td><span class="pill '+esc+'">'+(a.estatus_atencion||'Pendiente')+'</span>'+(a.aviso24?' '+htmlPlazo24h(a):' '+htmlPlazoAviso(a))+'</td>'
       +'<td>'
       +(esUmbral?'<button class="btn btn-xs btn-p crear-aviso-btn" data-altid="'+String(a.id)+'">Crear aviso</button> ':'')
       +'<button class="btn btn-xs ver-alerta-btn" data-altid="'+a.id+'">Ver</button>'
@@ -11444,7 +11509,7 @@ function renderFichaAlerta(a) {
     +'<span class="pill '+nc+'">'+(a.nivel||'-')+'</span>'
     +'<span class="pill '+esc+'">'+(a.estatus_atencion||'Pendiente')+'</span>'
     +'</div>'
-    +'<div class="psub">'+(a.tipo||'-')+(a.fraccion?' | Fr.'+(a.fraccion==='ARI'?'XV':'V'):'')+(a.aviso24?' '+htmlPlazo24h(a):'')+'</div>'
+    +'<div class="psub">'+(a.tipo||'-')+(a.fraccion?' | Fr.'+(a.fraccion==='ARI'?'XV':'V'):'')+(a.aviso24?' '+htmlPlazo24h(a):' '+htmlPlazoAviso(a))+'</div>'
     +'</div>'
     +'<div style="display:flex;gap:8px">'
     +(esUmbral?'<button class="btn btn-p crear-aviso-btn" data-altid="'+a.id+'">Crear aviso</button>':'')
@@ -11462,6 +11527,7 @@ function renderFichaAlerta(a) {
     +fcHtml('Umbral aplicable',a.monto_umbral?'$'+parseFloat(a.monto_umbral).toLocaleString('es-MX'):'')
     +fcHtml('Num. operaciones',a.num_operaciones)
     +fcHtml('Fecha registro',String(a.fecha_registro||'-').substring(0,10))
+    +(plazoAviso(a) ? fcHtml('Fecha de la operacion', plazoAviso(a).acto) + fcHtml('Plazo para presentar el aviso', plazoAviso(a).limite + ' (dia 17 del mes siguiente, art. 23 LFPIORPI)') : '')
     +(a.aviso24 ? fcHtml('Se conocio el hecho', fmtFechaHora(a.detectado)) + fcHtml('Plazo del aviso', fmtFechaHora(a.plazo_24h))
         + (a.persona_24h ? fcHtml('Persona', capEsc(a.persona_24h)) : '')
         + (a.operacion_celebrada ? fcHtml('Operacion celebrada', a.operacion_celebrada === 'SI' ? 'Si' : 'No, solo se intento') : '') : '')
@@ -15873,6 +15939,9 @@ function crearAlertaUmbral(datos) {
       };
       if (datos.meses_califican !== undefined) alerta.meses_califican = datos.meses_califican;
       ['grupo_id', 'grupo_desc', 'ops_umbral', 'ventana_desde', 'ventana_hasta'].forEach(function(k){ if (datos[k] !== undefined) alerta[k] = datos[k]; });
+      // Fecha de la operacion que genero la obligacion del aviso: el plazo del
+      // dia 17 corre desde ella aunque despues la alerta se actualice.
+      alerta.fecha_acto_aviso = String(datos.ventana_hasta || hoy()).substring(0, 10);
       spCreate('PLD_Alertas', alerta, null);
       console.log('[UMBRAL] Nueva alerta de umbral creada para', datos.nombre_cliente, '| fraccion:', datos.fraccion);
     }
