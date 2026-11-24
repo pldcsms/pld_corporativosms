@@ -533,12 +533,12 @@ function modulosPermitidos() {
 }
 
 // ── Cierre de sesion por inactividad ─────────────────────────
-// 15 minutos sin uso en telefono y 60 en computadora; un minuto antes se
+// 10 minutos sin uso en telefono y 15 en computadora; un minuto antes se
 // avisa. La ultima actividad se guarda para que tambien cuente al volver a
 // abrir la app (en telefono, solo mientras dure la sesion del navegador).
 var INACT_CLAVE = 'pld_ultima_actividad';
 var _inact = { ult: Date.now(), timer: null, avisado: false, guardado: 0 };
-function minutosInactividad() { return esTelefono() ? 15 : 60; }
+function minutosInactividad() { return esTelefono() ? 10 : 15; }
 function almacenSesion() { try { return esTelefono() ? sessionStorage : localStorage; } catch(e) { return null; } }
 function marcarActividad() {
   var ahora = Date.now();
