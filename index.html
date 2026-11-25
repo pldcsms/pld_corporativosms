@@ -1389,6 +1389,39 @@ var DOCS_OBL_COND = {
   'Constancia declaracion de Dueno Beneficiario': function(c){ return c.tiene_dueno_ben === 'SI'; }
 };
 
+// ── Regimen simplificado (art. 12 fr. V de las Reglas y Anexo 7) ──
+// Una entidad del Anexo 7-A (PM_SIMP) se identifica solo con los datos del
+// Anexo 7, sin documentos, siempre que sea de riesgo Bajo (arts. 17 y 34 de
+// las Reglas, art. 15 del Reglamento). Con riesgo Medio o Alto pierde el
+// regimen y se le piden estos documentos.
+var DOCS_OBL_SIMP_COMPLETO = ['Documento que acredite existencia legal','Cedula de Identificacion Fiscal (SAT)',
+  'Comprobante de domicilio','Identificacion del representante / funcionario','Formato de Conocimiento del Cliente'];
+function regimenSimplificado(c) { return !!c && c.tipo === 'PM_SIMP' && (c.riesgo || 'Bajo') === 'Bajo'; }
+function docsObligatoriosDe(c) {
+  var arr = (c.tipo === 'PM_SIMP' && !regimenSimplificado(c)) ? DOCS_OBL_SIMP_COMPLETO.slice() : (DOCS_OBL[c.tipo] || []).slice();
+  Object.keys(DOCS_OBL_COND).forEach(function(d){ if (DOCS_OBL_COND[d](c) && arr.indexOf(d) < 0) arr.push(d); });
+  return arr;
+}
+// Datos obligatorios del expediente, medidos al guardarlo (submitCliente):
+// cuantos pide el formulario y cuales faltan. null si nunca se midieron.
+function datosDelExpediente(c) {
+  var t = Number(c && c.datos_req_total) || 0;
+  if (!t) return null;
+  var f = Array.isArray(c.datos_faltantes) ? c.datos_faltantes : [];
+  return { total: t, completos: Math.max(0, t - f.length), faltantes: f };
+}
+// Avance del expediente. La entidad del Anexo 7 se mide con datos (regimen
+// simplificado) o con datos y documentos (sin el); los demas tipos, con sus
+// documentos obligatorios, como siempre. pct null = sin medir.
+function avanceExpediente(c, docsCargados, docsTotal) {
+  if (c.tipo === 'PM_SIMP') {
+    var dd = datosDelExpediente(c);
+    var t = docsTotal + (dd ? dd.total : 0), k = docsCargados + (dd ? dd.completos : 0);
+    return { pct: t ? Math.round(k / t * 100) : null, mide: regimenSimplificado(c) ? 'datos' : 'datos y documentos', datos: dd };
+  }
+  return { pct: docsTotal ? Math.round(docsCargados / docsTotal * 100) : 100, mide: 'documentos', datos: null };
+}
+
 var ASESORES = []; // se llena desde PLD_Config al iniciar
 var _asesoresConfigId = null;
 
@@ -6204,12 +6237,12 @@ function dashScanExpedientes(){
   var box = document.getElementById('dash-exp-body'); if(!box) return;
   var clientes = App.clientes || [];
   if (!clientes.length){ box.innerHTML = '<div class="empty" style="padding:16px">Sin clientes para calcular.</div>'; return; }
-  function oblDe(c){
-    var arr = (DOCS_OBL[c.tipo]||[]).slice();
-    Object.keys(DOCS_OBL_COND).forEach(function(d){ if (DOCS_OBL_COND[d](c) && arr.indexOf(d)<0) arr.push(d); });
-    return arr;
-  }
   var i=0, sumaPct=0, completos=0, parciales=0, vacios=0, conObl=0;
+  function cuenta(pct){
+    if (pct === null) return;
+    sumaPct += pct; conObl++;
+    if (pct>=100) completos++; else if (pct>0) parciales++; else vacios++;
+  }
   function paso(){
     if (i >= clientes.length){
       dashPintarAvance(box, clientes.length, conObl?Math.round(sumaPct/conObl):0, completos, parciales, vacios);
@@ -6219,16 +6252,16 @@ function dashScanExpedientes(){
     box.innerHTML = '<div class="empty" style="padding:16px"><div class="spin" style="margin:0 auto 8px"></div>Revisando expediente '+(i+1)+' de '+clientes.length+'...</div>';
     var nom = nombreCliente(c).replace(/[^a-zA-Z0-9_\-]/g,'_').substring(0,40);
     var carpeta = 'PLD_Documentos/'+nStr(c.num_cliente)+'_'+nom;
-    var obl = oblDe(c);
+    var obl = docsObligatoriosDe(c);
+    // Regimen simplificado: solo datos, no hay carpeta que revisar.
+    if (!obl.length) {
+      if (c.tipo === 'PM_SIMP') cuenta(avanceExpediente(c, 0, 0).pct);
+      i++; setTimeout(paso, 0); return;
+    }
     graph('GET', '/sites/'+App.siteId+'/drive/root:/'+carpeta+':/children', null, function(data){
       var archivos = (data && data.value) ? data.value : [];
       function tiene(td){ var pref = td.replace(/\s/g,'_').substring(0,20); return archivos.some(function(a){ return a.name.indexOf(pref)>=0; }); }
-      if (obl.length){
-        var car = obl.filter(tiene).length;
-        var pct = Math.round(car/obl.length*100);
-        sumaPct += pct; conObl++;
-        if (pct>=100) completos++; else if (pct>0) parciales++; else vacios++;
-      }
+      cuenta(avanceExpediente(c, obl.filter(tiene).length, obl.length).pct);
       i++; paso();
     });
   }
@@ -6245,7 +6278,7 @@ function dashPintarAvance(box, totalCli, promedio, completos, parciales, vacios)
       + barraDash('Parciales', parciales, totalCli, 'var(--am)')
       + barraDash('Sin documentos', vacios, totalCli, 'var(--rj)')
     + '</div></div>'
-    + '<div style="font-size:11px;color:var(--tx3);margin-top:8px">Promedio de documentos obligatorios cargados sobre '+totalCli+' expedientes.</div>';
+    + '<div style="font-size:11px;color:var(--tx3);margin-top:8px">Promedio de documentos obligatorios cargados sobre '+totalCli+' expedientes. Las entidades del Anexo 7 cuentan sus datos: solo datos en regimen simplificado, datos y documentos sin el.</div>';
 }
 
 // ================================================================
@@ -9576,7 +9609,7 @@ function htmlFormPM_SIMP(d) {
   return '<div class="phdr"><div><div class="ptit">'+(d.id?'Editar':'Nuevo')+' expediente - Entidad regulada / publica</div>'
     +'<div class="psub">Anexo 7 RCG LFPIORPI - Regimen simplificado</div></div>'
     +'<button class="btn" onclick="pgClientes()">Volver</button></div>'
-    +'<div class="alerta-banner">Regimen simplificado aplicable a entidades del Anexo 7-A (instituciones financieras, dependencias publicas). Verifica que el cliente califique antes de aplicar este regimen.</div>'
+    +'<div class="alerta-banner"><span>Regimen simplificado aplicable a entidades del Anexo 7-A (instituciones financieras, dependencias publicas) de riesgo Bajo: el expediente se integra solo con estos datos. Si la entidad resulta de riesgo Medio o Alto, se le piden documentos.</span></div>'
     +'<form id="frm" onsubmit="return false">'
     +'<div class="card"><div class="card-h"><span class="card-t">Datos generales del expediente</span></div>'
     +'<div class="fgrid">'
@@ -10138,18 +10171,23 @@ function validarCliente(frm, datos, tipo) {
   }
 
   // Campos obligatorios visibles (marcados con * en el formulario)
+  var reqVis = 0, faltLoop = 0;
   frm.querySelectorAll('.fg').forEach(function(w){
     if (!w.querySelector('label .req')) return;      // no es obligatorio
     if (w.offsetParent === null) return;              // sección oculta (p.ej. dueño beneficiario NO)
     var el = w.querySelector('input.inp, select.sel, textarea.txa');
     if (!el) return;
+    reqVis++;
     if (!(el.value || '').trim()) {
       var lbl = w.querySelector('label');
       faltan.push(lbl ? lbl.textContent.replace('*','').trim() : el.name);
+      faltLoop++;
     }
   });
 
-  return { bloqueantes: bloq, faltantes: faltan };
+  // reqTotal: los obligatorios visibles mas los faltantes que se revisan
+  // aparte (razon para operar en Mexico, fin del cargo, inmueble "Otro").
+  return { bloqueantes: bloq, faltantes: faltan, reqTotal: reqVis + (faltan.length - faltLoop) };
 }
 
 // ── RFC unico por entidad ─────────────────────────────────────────────────
@@ -10239,6 +10277,9 @@ function submitCliente(tipo, idEx) {
     alert('No se puede guardar el expediente:\n\n• ' + val.bloqueantes.join('\n• '));
     return;
   }
+  // Avance de los datos del expediente (datosDelExpediente).
+  datos.datos_req_total = val.reqTotal;
+  datos.datos_faltantes = val.faltantes.slice();
   // Sin estatus PEP, "El PEP es extranjero" no aplica (el campo esta oculto).
   if (!datos.estatus_pep || datos.estatus_pep === 'NO APLICA') datos.pep_extranjero = 'NO';
   if (avisoPEPExtranjeroMexicano(frm, datos)) return;
@@ -11187,14 +11228,9 @@ function renderDocs() {
   var nom = nombreCliente(c).replace(/[^a-zA-Z0-9_\-]/g,'_').substring(0,40);
   var carpeta = 'PLD_Documentos/'+nStr(c.num_cliente)+'_'+nom;
 
-  // Calcular lista de obligatorios considerando condiciones
-  var oblBase = DOCS_OBL[c.tipo] || [];
-  var obligatorios = oblBase.slice();
-  Object.keys(DOCS_OBL_COND).forEach(function(docNom) {
-    var esCond = DOCS_OBL_COND[docNom](c);
-    var yaEsta = obligatorios.indexOf(docNom) >= 0;
-    if (esCond && !yaEsta) obligatorios.push(docNom);
-  });
+  // Obligatorios segun el tipo, las condiciones y, en la entidad del Anexo 7,
+  // si conserva el regimen simplificado.
+  var obligatorios = docsObligatoriosDe(c);
 
   graph('GET', '/sites/'+App.siteId+'/drive/root:/'+carpeta+':/children', null, function(data) {
     var archivos = (data && data.value) ? data.value : [];
@@ -11207,17 +11243,31 @@ function renderDocs() {
     // Progreso: obligatorios cargados
     var oblTotal    = obligatorios.length;
     var oblCargados = obligatorios.filter(function(td){ return archivosDoc(td).length > 0; }).length;
-    var pct         = oblTotal ? Math.round(oblCargados / oblTotal * 100) : 100;
+    var av          = avanceExpediente(c, oblCargados, oblTotal);
+    var pct         = av.pct === null ? 0 : av.pct;
     var colorBarra  = pct === 100 ? 'var(--vd)' : pct >= 50 ? 'var(--am)' : 'var(--rj)';
+    var dd          = av.datos;
 
-    var header = '<div style="margin-bottom:14px">'
+    var header = (c.tipo === 'PM_SIMP' ? avisoRegimenSimpHtml(c) : '')
+      +'<div style="margin-bottom:14px">'
       +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
-      +'<span style="font-size:12px;color:var(--tx2)">Documentos obligatorios cargados</span>'
-      +'<span style="font-size:12px;font-weight:600;color:var(--tx1)">'+oblCargados+' / '+oblTotal
-      +' &nbsp;('+pct+'%)</span></div>'
+      +'<span style="font-size:12px;color:var(--tx2)">'
+      +(av.mide === 'datos' ? 'Datos obligatorios completos' : av.mide === 'datos y documentos' ? 'Datos completos y documentos obligatorios cargados' : 'Documentos obligatorios cargados')+'</span>'
+      +'<span style="font-size:12px;font-weight:600;color:var(--tx1)">'
+      +(av.pct === null ? 'Sin medir'
+        : av.mide === 'documentos' ? oblCargados+' / '+oblTotal+' &nbsp;('+pct+'%)'
+        : (dd ? 'Datos '+dd.completos+' / '+dd.total : 'Datos sin medir')+(oblTotal ? ' · documentos '+oblCargados+' / '+oblTotal : '')+' &nbsp;('+pct+'%)')
+      +'</span></div>'
       +'<div style="height:6px;background:var(--bg2);border-radius:3px;overflow:hidden">'
       +'<div style="height:100%;width:'+pct+'%;background:'+colorBarra+';border-radius:3px;transition:width .4s"></div>'
-      +'</div></div>';
+      +'</div>'
+      +(c.tipo === 'PM_SIMP' && !dd
+          ? '<div style="font-size:11px;color:var(--tx3);margin-top:6px">Los datos se miden al guardar el expediente: edítalo y guárdalo una vez.</div>'
+          : '')
+      +(dd && dd.faltantes.length
+          ? '<div style="font-size:11px;color:var(--am);margin-top:6px">Faltan: '+dd.faltantes.map(capEsc).join(', ')+'.</div>'
+          : '')
+      +'</div>';
 
     // Separar obligatorios y complementarios
     var rows = '';
@@ -11274,6 +11324,17 @@ function renderDocs() {
 
     document.getElementById('fd-docs').innerHTML = header + (rows || '<div class="empty">Sin documentos.</div>');
   });
+}
+
+// Aviso de la pestana Documentos de una entidad del Anexo 7.
+function avisoRegimenSimpHtml(c) {
+  if (regimenSimplificado(c))
+    return '<div style="margin-bottom:12px;padding:10px 12px;border-left:3px solid var(--vd);background:var(--vd3);font-size:12px;color:var(--tx1);line-height:1.6">'
+      + '<strong>Regimen simplificado</strong> (art. 12 fr. V de las Reglas y Anexo 7): la entidad es de riesgo Bajo, asi que el expediente se integra solo con datos. '
+      + 'No hay documentos obligatorios y el expediente esta al 100 % cuando sus datos estan completos.</div>';
+  return '<div style="margin-bottom:12px;padding:10px 12px;border-left:3px solid var(--am);background:var(--am3);font-size:12px;color:var(--tx1);line-height:1.6">'
+    + '<strong>No califica para el regimen simplificado:</strong> la entidad es de riesgo ' + capEsc(c.riesgo || '') + ' y las medidas simplificadas solo aplican a riesgo Bajo (arts. 12 fr. V, 17 y 34 de las Reglas). '
+    + 'Ademas de los datos, son obligatorios los documentos marcados abajo.</div>';
 }
 
 function subirDoc(input, tipoDoc, carpeta) {
@@ -18276,11 +18337,7 @@ function _generarExpedientesXLSX() {
       var a = (typeof ASESORES!=='undefined'?ASESORES:[]).find(function(x){ return x.id===c.asesor_id; });
       return a ? a.nombre : '';
     }
-    function obligatoriosDe(c){
-      var arr = (DOCS_OBL[c.tipo]||[]).slice();
-      Object.keys(DOCS_OBL_COND).forEach(function(d){ if (DOCS_OBL_COND[d](c) && arr.indexOf(d)<0) arr.push(d); });
-      return arr;
-    }
+    function obligatoriosDe(c){ return docsObligatoriosDe(c); }
 
     var filas = [], i = 0;
     function siguiente() {
@@ -18295,11 +18352,13 @@ function _generarExpedientesXLSX() {
         function tiene(td){ var pref = td.replace(/\s/g,'_').substring(0,20); return archivos.some(function(a){ return a.name.indexOf(pref)>=0; }); }
         var total = obligatorios.length;
         var cargados = obligatorios.filter(tiene).length;
-        var pct = total ? Math.round(cargados/total*100) : 100;
+        var av = avanceExpediente(c, cargados, total), dd = av.datos;
         filas.push([
           nStr(c.num_cliente), c.Title||nombreCliente(c), labelTipo(c.tipo),
           c.entidad_nombre||c.entidad_id||'', asesorNom(c), c.estatus||'',
-          total, cargados, pct
+          c.tipo === 'PM_SIMP' ? (regimenSimplificado(c) ? 'Simplificado (solo datos)' : 'Completo (riesgo ' + (c.riesgo||'') + ')') : '',
+          c.tipo === 'PM_SIMP' ? (dd ? dd.completos + ' / ' + dd.total : 'Sin medir') : '',
+          total, cargados, av.pct === null ? 'Sin medir' : av.pct
         ]);
         i++; siguiente();
       });
@@ -18310,7 +18369,7 @@ function _generarExpedientesXLSX() {
 }
 function _finExpedientes(filas, esConsolidada, entId) {
   var cols = ['Num. Cliente','Nombre / Razon social','Tipo','Entidad','Asesor comercial','Estatus',
-    'Docs obligatorios','Cargados','% avance'];
+    'Regimen (Anexo 7)','Datos obligatorios completos','Docs obligatorios','Cargados','% avance'];
   var fecha = hoy();
   var wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, _xlsxHoja(cols, filas), 'Expedientes');
