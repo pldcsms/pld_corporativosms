@@ -4287,6 +4287,19 @@ function pgConfig(sec) {
     +'<button class="btn btn-p" onclick="guardarUMA()">Actualizar UMA</button>'
     +'</div></div>'
 
+    +'<div class="card"><div class="card-h"><span class="card-t">Dias inhabiles del SAT</span>'
+    +'<span class="pill p-am" style="margin-left:8px">Actualizar con cada Resolucion Miscelanea Fiscal</span></div>'
+    +'<div class="card-b">'
+    +'<p style="font-size:12px;color:var(--tx2);margin:0 0 8px">Sirven para recorrer el plazo del dia 17 y contar los dias de la facilidad administrativa de la UIF. '
+    +'La app ya considera sabados, domingos y los dias del art. 36 Bis de las Reglas. Captura aqui los dias del periodo general de vacaciones que publique el SAT, uno por linea (AAAA-MM-DD).</p>'
+    +'<div style="font-size:11px;color:var(--tx3);margin-bottom:8px">Dias de ley ' + new Date().getFullYear() + ': ' + inhabilesDeLey(new Date().getFullYear()).join(', ')
+    +'<br>Dias de ley ' + (new Date().getFullYear() + 1) + ': ' + inhabilesDeLey(new Date().getFullYear() + 1).join(', ') + '</div>'
+    +'<textarea class="inp mono" id="inh-sat" rows="5" style="width:100%;font-size:12px" placeholder="2026-12-21">' + DIAS_INHABILES_SAT.join('\n') + '</textarea>'
+    +'</div>'
+    +'<div style="padding:12px 16px;border-top:1px solid var(--brd);display:flex;justify-content:flex-end">'
+    +'<button class="btn btn-p" onclick="guardarInhabilesSAT()">Guardar dias inhabiles</button>'
+    +'</div></div>'
+
     +'<div class="card"><div class="card-h"><span class="card-t">Entidades obligadas</span>'
     +'<span style="font-size:12px;color:var(--tx3)">'+ENTIDADES.length+' entidad'+(ENTIDADES.length!==1?'es':'')+'</span></div>'
     +'<div class="card-b">'
@@ -5972,6 +5985,31 @@ function guardarUMA() {
 }
 
 function guardarRFC(idx) { guardarNombreEntidad(idx); } // compatibilidad
+
+// Dias del periodo general de vacaciones del SAT (art. 36 Bis de las Reglas).
+function guardarInhabilesSAT() {
+  if (App.rol !== 'admin' || !tieneAcceso('config')) { toast('Solo un administrador, desde una computadora, cambia la configuracion', 'w'); return; }
+  var el = document.getElementById('inh-sat'); if (!el) return;
+  var malas = [], dias = [];
+  String(el.value || '').split(/[\s,;]+/).filter(Boolean).forEach(function(t){
+    var d = new Date(t + 'T12:00:00');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(t) || isNaN(d.getTime()) || fechaISO(d) !== t) malas.push(t);
+    else if (dias.indexOf(t) < 0) dias.push(t);
+  });
+  if (malas.length) { toast('Fechas invalidas: ' + malas.join(', ') + '. Usa AAAA-MM-DD', 'e'); return; }
+  dias.sort();
+  spGet('PLD_Config', function(lista) {
+    var item = itemConfigSistema(lista);
+    var listo = function(){
+      DIAS_INHABILES_SAT = dias;
+      try { localStorage.setItem('dias_inhabiles_sat', JSON.stringify(dias)); } catch(e) {}
+      toast(dias.length + ' dia(s) inhabil(es) del SAT guardado(s)', 's'); pgConfig();
+    };
+    bitCtx({ grupo: 'Configuracion', accion: 'Dias inhabiles del SAT', resumen: dias.length ? dias.join(', ') : 'Sin dias capturados' });
+    if (item && item.id) spPatch('PLD_Config', item.id, { dias_inhabiles_sat: dias }, listo);
+    else spCreate('PLD_Config', { Title: 'CONFIG_SISTEMA', dias_inhabiles_sat: dias, actualizado_por: App.cuenta.username }, listo);
+  });
+}
 
 function verificarAlertaUMA() {
   var hoyDate = new Date();
@@ -11341,30 +11379,115 @@ function limiteAviso17(f) {
   return l.getFullYear() + '-' + pad(l.getMonth() + 1) + '-' + pad(l.getDate());
 }
 function avisoPresentado(a) { return !!(a.fecha_envio_aviso || a.folio_acuse || a.estatus_atencion === 'Reportada'); }
+
+// ── Dias inhabiles y facilidad administrativa ──
+// Inhabiles (art. 36 Bis de las Reglas): sabados, domingos, los dias de ley
+// y el periodo de vacaciones que el SAT publica cada ano en la Resolucion
+// Miscelanea Fiscal (lista DIAS_INHABILES_SAT, que captura el administrador
+// en Configuracion). Si el 17 es inhabil, el plazo pasa al dia habil
+// siguiente. Facilidad administrativa de la UIF (preguntas frecuentes del
+// SAT 2026, 5.2 y 5.3): se puede presentar despues del 17 exactamente en el
+// dia habil que toca al sexto digito numerico del RFC del sujeto obligado.
+var DIAS_INHABILES_SAT = (function(){ try { return JSON.parse(localStorage.getItem('dias_inhabiles_sat') || '[]') || []; } catch(e) { return []; } })();
+var FACILIDAD_DIAS = { 1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 5, 0: 5 };
+function fechaISO(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+function sumarDias(f, n) { var d = new Date(f + 'T12:00:00'); d.setDate(d.getDate() + n); return fechaISO(d); }
+function difDias(f) { return Math.round((new Date(f + 'T12:00:00') - new Date(hoy() + 'T12:00:00')) / 86400000); }
+// n-esimo lunes de un mes (mes0: 0 = enero).
+function nLunes(anio, mes0, n) {
+  var d = new Date(anio, mes0, 1, 12);
+  return new Date(anio, mes0, 1 + (8 - d.getDay()) % 7 + 7 * (n - 1), 12);
+}
+function inhabilesDeLey(anio) {
+  var l = [anio + '-01-01', fechaISO(nLunes(anio, 1, 1)), fechaISO(nLunes(anio, 2, 3)), anio + '-05-01', anio + '-05-05',
+           anio + '-09-16', fechaISO(nLunes(anio, 10, 3)), anio + '-12-25'];
+  if ((anio - 2024) % 6 === 0) l.push(anio + '-10-01');   // transmision del Poder Ejecutivo
+  return l.sort();
+}
+function esInhabil(f) {
+  var d = new Date(f + 'T12:00:00'), w = d.getDay();
+  if (w === 0 || w === 6) return true;
+  return inhabilesDeLey(d.getFullYear()).indexOf(f) >= 0 || DIAS_INHABILES_SAT.indexOf(f) >= 0;
+}
+function habilDesde(f) { var x = f, i = 0; while (esInhabil(x) && i++ < 60) x = sumarDias(x, 1); return x; }
+// Solo cuentan los numeros del RFC, sin letras: FLY960905M2M -> 5.
+function sextoDigitoRFC(rfc) {
+  var dig = String(rfc || '').replace(/\D/g, '');
+  return dig.length >= 6 ? Number(dig.charAt(5)) : null;
+}
+function rfcEntidad(entId) { var e = ENTIDADES.filter(function(x){ return x.id === entId; })[0]; return e ? (e.rfc || '') : ''; }
+// Plazos de lo que se presenta por las operaciones del mes de fActo:
+// dia17, legal (el 17 o el habil siguiente), facilidad (dia exacto por el
+// RFC de la entidad; vacio sin RFC) y limite (el ultimo dia valido).
+function plazosPresentacion(fActo, entId) {
+  var d17 = limiteAviso17(fActo);
+  if (!d17) return null;
+  var legal = habilDesde(d17), dg = sextoDigitoRFC(rfcEntidad(entId)), fac = '';
+  if (dg !== null) {
+    var k = 0; fac = d17;
+    while (k < FACILIDAD_DIAS[dg]) { fac = sumarDias(fac, 1); if (!esInhabil(fac)) k++; }
+    if (fac < legal) fac = legal;
+  }
+  return { dia17: d17, legal: legal, facilidad: fac, digito: dg, limite: fac > legal ? fac : legal };
+}
+// Fecha de presentacion en AAAA-MM-DD (acepta DD/MM/AAAA del acuse).
+function normFechaPresentacion(f) {
+  f = String(f || '').trim();
+  var m = f.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + '-' + pad(Number(m[2])) + '-' + pad(Number(m[1]));
+  return /^\d{4}-\d{2}-\d{2}/.test(f) ? f.substring(0, 10) : '';
+}
+// 'oportuna' (hasta el plazo legal), 'facilidad' (exactamente el dia de la
+// facilidad) o 'extemporanea'; '' si no hay fecha.
+function oportunidadPresentacion(fecha, pz) {
+  fecha = normFechaPresentacion(fecha);
+  if (!fecha || !pz) return '';
+  if (fecha <= pz.legal) return 'oportuna';
+  return fecha === pz.facilidad ? 'facilidad' : 'extemporanea';
+}
+function textoPlazos(pz) {
+  if (!pz) return '';
+  return pz.legal + (pz.legal !== pz.dia17 ? ' (el 17 es inhabil; pasa al dia habil siguiente)' : ' (dia 17 del mes siguiente, art. 23 LFPIORPI)');
+}
+function textoFacilidad(pz) {
+  return pz && pz.facilidad && pz.facilidad !== pz.legal
+    ? pz.facilidad + ' — sexto digito del RFC de la entidad: ' + pz.digito + '. Solo vale presentandolo exactamente ese dia (facilidad administrativa de la UIF)'
+    : '';
+}
+
 // null si la alerta no lleva a un aviso con plazo del dia 17.
 function plazoAviso(a) {
   if (!a || a.aviso24 || altCategoria(a) !== 'Umbral') return null;
-  var f = fechaActoAlerta(a), lim = f ? limiteAviso17(f) : '';
-  if (!lim) return null;
-  var dias = Math.round((new Date(lim + 'T12:00:00') - new Date(hoy() + 'T12:00:00')) / 86400000);
-  return { acto: f, limite: lim, dias: dias, presentado: avisoPresentado(a), cerrada: a.estatus_atencion === 'Cerrada' };
+  var f = fechaActoAlerta(a), pz = f ? plazosPresentacion(f, a.entidad_id) : null;
+  if (!pz) return null;
+  return { acto: f, dia17: pz.dia17, legal: pz.legal, facilidad: pz.facilidad, digito: pz.digito, limite: pz.limite,
+           dias: difDias(pz.limite), diasLegal: difDias(pz.legal), pz: pz,
+           presentado: avisoPresentado(a), cerrada: a.estatus_atencion === 'Cerrada',
+           oportunidad: oportunidadPresentacion(a.fecha_envio_aviso, pz) };
 }
 function htmlPlazoAviso(a) {
   var p = plazoAviso(a);
   if (!p || p.cerrada) return '';
-  if (p.presentado) return '<span class="pill p-vd" style="font-size:10px">Aviso presentado</span>';
-  var tit = ' title="Operacion del ' + p.acto + '; plazo: dia 17 del mes siguiente (art. 23 LFPIORPI)"';
+  if (p.presentado) {
+    if (p.oportunidad === 'extemporanea') return '<span class="pill p-rj" style="font-size:10px" title="Presentado el ' + normFechaPresentacion(a.fecha_envio_aviso) + '; plazo: ' + p.legal + (p.facilidad ? ', facilidad: ' + p.facilidad : '') + '">Aviso presentado fuera de plazo</span>';
+    return '<span class="pill p-vd" style="font-size:10px">Aviso presentado' + (p.oportunidad === 'facilidad' ? ' (con facilidad)' : '') + '</span>';
+  }
+  var hayFac = p.facilidad && p.facilidad !== p.legal;
+  var tit = ' title="Operacion del ' + p.acto + '; plazo: ' + textoPlazos(p.pz) + (hayFac ? '; facilidad: presentar exactamente el ' + p.facilidad : '') + '"';
   if (p.dias < 0) return '<span class="pill p-rj" style="font-size:10px"' + tit + '>Aviso vencido el ' + p.limite + '</span>';
-  return '<span class="pill ' + (p.dias <= 5 ? 'p-rj' : p.dias <= 10 ? 'p-am' : 'p-gr') + '" style="font-size:10px"' + tit + '>Aviso vence el ' + p.limite
-    + (p.dias === 0 ? ' (hoy)' : ' (' + p.dias + (p.dias === 1 ? ' dia' : ' dias') + ')') + '</span>';
+  if (hayFac && p.diasLegal < 0) return '<span class="pill p-rj" style="font-size:10px"' + tit + '>Presentar exactamente el ' + p.facilidad + ' (facilidad)</span>';
+  return '<span class="pill ' + (p.diasLegal <= 5 ? 'p-rj' : p.diasLegal <= 10 ? 'p-am' : 'p-gr') + '" style="font-size:10px"' + tit + '>Aviso vence el ' + p.legal
+    + (p.diasLegal === 0 ? ' (hoy)' : ' (' + p.diasLegal + (p.diasLegal === 1 ? ' dia' : ' dias') + ')')
+    + (hayFac ? ' · facilidad: ' + p.facilidad : '') + '</span>';
 }
-// Avisos por umbral sin presentar: vencidos y los que vencen en los proximos dias.
+// Avisos por umbral sin presentar: vencidos (pasado el ultimo dia valido) y
+// los que vencen en los proximos dias o estan en el dia de la facilidad.
 function avisosPorVencer(alertas, dias) {
   var r = { vencidos: [], proximos: [] };
   (alertas || []).forEach(function(a){
     var p = plazoAviso(a);
     if (!p || p.presentado || p.cerrada) return;
-    if (p.dias < 0) r.vencidos.push(a); else if (p.dias <= (dias || 5)) r.proximos.push(a);
+    if (p.dias < 0) r.vencidos.push(a); else if (p.diasLegal <= (dias || 5)) r.proximos.push(a);
   });
   return r;
 }
@@ -11504,7 +11627,7 @@ function cargarAlertas(modo, valor) {
       var bannerPlazos = (pv.vencidos.length || pv.proximos.length || a24p.length)
         ? '<div class="alerta-banner" style="margin-bottom:12px;background:var(--rj3);color:var(--rj);border-color:var(--rj)"><span><strong>Avisos por presentar:</strong> '
           + [pv.vencidos.length ? pv.vencidos.length + ' vencido(s)' : '', pv.proximos.length ? pv.proximos.length + ' vence(n) en 5 dias o menos' : '', a24p.length ? a24p.length + ' aviso(s) de 24 horas' : ''].filter(Boolean).join(' · ')
-          + '. Los avisos por umbral se presentan a mas tardar el dia 17 del mes siguiente a la operacion (art. 23 LFPIORPI).</span></div>'
+          + '. Los avisos por umbral se presentan a mas tardar el dia 17 del mes siguiente a la operacion, o el dia habil siguiente si es inhabil (art. 23 LFPIORPI); con la facilidad de la UIF, exactamente el dia que toca al sexto digito del RFC de la entidad.</span></div>'
         : '';
       var apr  = todas.filter(function(a){ return a.requiere_aprobacion; });
       var pend = todas.filter(function(a){ return (a.estatus_atencion||'Pendiente')==='Pendiente'; });
@@ -11635,7 +11758,9 @@ function renderFichaAlerta(a) {
     +fcHtml('Umbral aplicable',a.monto_umbral?'$'+parseFloat(a.monto_umbral).toLocaleString('es-MX'):'')
     +fcHtml('Num. operaciones',a.num_operaciones)
     +fcHtml('Fecha registro',String(a.fecha_registro||'-').substring(0,10))
-    +(plazoAviso(a) ? fcHtml('Fecha de la operacion', plazoAviso(a).acto) + fcHtml('Plazo para presentar el aviso', plazoAviso(a).limite + ' (dia 17 del mes siguiente, art. 23 LFPIORPI)') : '')
+    +(plazoAviso(a) ? fcHtml('Fecha de la operacion', plazoAviso(a).acto) + fcHtml('Plazo para presentar el aviso', textoPlazos(plazoAviso(a).pz))
+        + (textoFacilidad(plazoAviso(a).pz) ? fcHtml('Facilidad administrativa', textoFacilidad(plazoAviso(a).pz)) : '')
+        + (plazoAviso(a).oportunidad === 'extemporanea' ? fcHtml('Presentacion', 'Fuera de plazo: presentado el ' + normFechaPresentacion(a.fecha_envio_aviso)) : '') : '')
     +(a.aviso24 ? fcHtml('Se conocio el hecho', fmtFechaHora(a.detectado)) + fcHtml('Plazo del aviso', fmtFechaHora(a.plazo_24h))
         + (a.persona_24h ? fcHtml('Persona', capEsc(a.persona_24h)) : '')
         + (a.operacion_celebrada ? fcHtml('Operacion celebrada', a.operacion_celebrada === 'SI' ? 'Si' : 'No, solo se intento') : '') : '')
@@ -13384,6 +13509,12 @@ function cargarConfigUMA() {
         aplicarListasGafi();
       } catch(e) { console.warn('Listas GAFI parse error', e); }
     }
+    if (cfg.dias_inhabiles_sat) {
+      try {
+        var di = typeof cfg.dias_inhabiles_sat === 'string' ? JSON.parse(cfg.dias_inhabiles_sat) : cfg.dias_inhabiles_sat;
+        if (Array.isArray(di)) { DIAS_INHABILES_SAT = di; localStorage.setItem('dias_inhabiles_sat', JSON.stringify(di)); }
+      } catch(e) { console.warn('Dias inhabiles parse error', e); }
+    }
     if (cfg.fraccionamientos) {
       try {
         CAT_FRACC = (typeof cfg.fraccionamientos === 'string' ? JSON.parse(cfg.fraccionamientos) : cfg.fraccionamientos) || [];
@@ -13422,7 +13553,7 @@ function entidadesControl() {
 function pgControlMensual() {
   document.querySelectorAll('#sb-ct .sb-item').forEach(function(e){ e.classList.remove('on'); });
   setMain('<div class="phdr"><div><div class="ptit">Control mensual de avisos</div>'
-    + '<div class="psub">Por entidad, fraccion y mes: avisos presentados, avisos pendientes e informe en ceros (art. 25 de las Reglas). Plazo: dia 17 del mes siguiente.</div></div>'
+    + '<div class="psub">Por entidad, fraccion y mes: avisos presentados, avisos pendientes e informe en ceros (art. 25 de las Reglas). Plazo: dia 17 del mes siguiente, o el dia habil siguiente si es inhabil; con la facilidad de la UIF, exactamente el dia que toca al sexto digito del RFC de la entidad.</div></div>'
     + '<button class="btn" onclick="pgAvisos()">Volver</button></div>'
     + '<div id="ctl-ct"><div class="empty"><div class="spin" style="margin:0 auto"></div></div></div>');
   spGet('PLD_Operaciones', function(avisos){
@@ -13438,7 +13569,7 @@ function pgControlMensual() {
 // Estado de un mes: aviso enviado, aviso pendiente, informe en ceros
 // presentado o pendiente, o mes en curso.
 function estadoMesControl(ent, frac, mes, avisos, alertas, regs) {
-  var mesHoy = hoy().substring(0, 7), lim = limiteAviso17(mes + '-01');
+  var mesHoy = hoy().substring(0, 7), pz = plazosPresentacion(mes + '-01', ent.id), lim = pz.legal;
   var delMes = avisos.filter(function(o){ return (o.fraccion || 'INM') === frac && (o.entidad_id || '') === ent.id && String(o.fecha_operacion || '').substring(0, 7) === mes; });
   var enviados = delMes.filter(function(o){ return o.estatus_aviso === 'Enviado'; }).length;
   var sinEnviar = delMes.length - enviados;
@@ -13447,13 +13578,16 @@ function estadoMesControl(ent, frac, mes, avisos, alertas, regs) {
     return p && !p.presentado && !p.cerrada && (a.fraccion || 'INM') === frac && (!a.entidad_id || a.entidad_id === ent.id) && p.acto.substring(0, 7) === mes;
   }).length;
   var reg = regs[ent.id + '|' + frac + '|' + mes] || null;
-  var e = { mes: mes, limite: lim, enviados: enviados, sinEnviar: sinEnviar, alertasPend: alertasPend, informe: reg };
+  var e = { mes: mes, limite: lim, facilidad: pz.facilidad !== lim ? pz.facilidad : '', pz: pz, enviados: enviados, sinEnviar: sinEnviar, alertasPend: alertasPend, informe: reg };
   if (enviados) e.estado = 'AVISOS';
   else if (sinEnviar || alertasPend) e.estado = 'AVISO_PENDIENTE';
   else if (reg) e.estado = 'CEROS_OK';
   else if (mes >= mesHoy) e.estado = 'EN_CURSO';
   else e.estado = 'CEROS_PENDIENTE';
-  e.vencido = (e.estado === 'CEROS_PENDIENTE' || e.estado === 'AVISO_PENDIENTE') && hoy() > lim;
+  var pendiente = e.estado === 'CEROS_PENDIENTE' || e.estado === 'AVISO_PENDIENTE';
+  e.vencido = pendiente && hoy() > pz.limite;
+  e.enFacilidad = pendiente && !e.vencido && hoy() > lim && !!e.facilidad;
+  e.extemporaneo = !!(reg && oportunidadPresentacion(reg.fecha_envio, pz) === 'extemporanea');
   return e;
 }
 // Actividades que la entidad tiene registradas ante el SAT (por omision,
@@ -13489,10 +13623,10 @@ function renderControlMensual(avisos, alertas) {
         var e = estadoMesControl(ent, fr[0], mes, avisos, alertas, regs);
         var pill = {
           AVISOS: '<span class="pill p-vd">' + e.enviados + (e.enviados === 1 ? ' aviso enviado' : ' avisos enviados') + '</span>',
-          AVISO_PENDIENTE: '<span class="pill ' + (e.vencido ? 'p-rj' : 'p-am') + '">Aviso por presentar' + (e.vencido ? ' (vencido)' : '') + '</span>',
-          CEROS_OK: '<span class="pill p-vd">Informe en ceros presentado</span>',
+          AVISO_PENDIENTE: '<span class="pill ' + (e.vencido || e.enFacilidad ? 'p-rj' : 'p-am') + '">Aviso por presentar' + (e.vencido ? ' (vencido)' : e.enFacilidad ? ' (solo el ' + e.facilidad + ')' : '') + '</span>',
+          CEROS_OK: e.extemporaneo ? '<span class="pill p-rj">Informe en ceros presentado fuera de plazo</span>' : '<span class="pill p-vd">Informe en ceros presentado</span>',
           EN_CURSO: '<span class="pill p-gr">Mes en curso</span>',
-          CEROS_PENDIENTE: '<span class="pill ' + (e.vencido ? 'p-rj' : 'p-am') + '">Informe en ceros pendiente' + (e.vencido ? ' (vencido)' : '') + '</span>'
+          CEROS_PENDIENTE: '<span class="pill ' + (e.vencido || e.enFacilidad ? 'p-rj' : 'p-am') + '">Informe en ceros pendiente' + (e.vencido ? ' (vencido)' : e.enFacilidad ? ' (solo el ' + e.facilidad + ')' : '') + '</span>'
         }[e.estado];
         var det = [e.sinEnviar ? e.sinEnviar + ' aviso(s) sin enviar' : '', e.alertasPend ? e.alertasPend + ' alerta(s) de aviso sin presentar' : '',
                    e.informe ? 'Acuse ' + capEsc(e.informe.folio || '') + ' del ' + capEsc(e.informe.fecha_envio || '') : ''].filter(Boolean).join(' · ');
@@ -13501,7 +13635,8 @@ function renderControlMensual(avisos, alertas) {
             + '<button class="btn btn-xs btn-p" onclick="registrarInformeCeros(\'' + ent.id + '\',\'' + fr[0] + '\',\'' + mes + '\')">Registrar presentacion</button>'
           : e.estado === 'CEROS_OK' ? '<button class="btn btn-xs" onclick="xmlInformeCeros(\'' + ent.id + '\',\'' + fr[0] + '\',\'' + mes + '\')">XML en ceros</button>' : '';
         return '<tr><td style="white-space:nowrap">' + mes + '</td><td>' + pill + (det ? '<div style="font-size:11px;color:var(--tx3);margin-top:2px">' + det + '</div>' : '') + '</td>'
-          + '<td style="font-size:12px;white-space:nowrap">' + (e.estado === 'EN_CURSO' ? '' : e.limite) + '</td><td style="white-space:nowrap">' + acc + '</td></tr>';
+          + '<td style="font-size:12px;white-space:nowrap">' + (e.estado === 'EN_CURSO' ? '' : e.limite
+            + (e.facilidad ? '<div style="font-size:11px;color:var(--tx3)" title="Facilidad administrativa de la UIF: solo vale presentandolo exactamente ese dia">Facilidad: ' + e.facilidad + '</div>' : '')) + '</td><td style="white-space:nowrap">' + acc + '</td></tr>';
       }).join('');
       html += '<div class="card"><div class="card-h"><span class="card-t">' + capEsc(ent.nombre || ent.id) + ' · ' + fr[1] + '</span>'
         + '<span style="font-size:12px;color:var(--tx3)">RFC ' + capEsc(ent.rfc || 'sin configurar') + '</span></div>'
@@ -13537,6 +13672,9 @@ function registrarInformeCeros(entId, frac, mes) {
   if (fecha === null) return;
   fecha = String(fecha).trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) { toast('Escribe la fecha como AAAA-MM-DD', 'w'); return; }
+  var pzI = plazosPresentacion(mes + '-01', entId);
+  if (oportunidadPresentacion(fecha, pzI) === 'extemporanea'
+      && !confirm('El ' + fecha + ' queda fuera de plazo: el limite era el ' + pzI.legal + (pzI.facilidad && pzI.facilidad !== pzI.legal ? ' y la facilidad solo valia el ' + pzI.facilidad : '') + '.\n\n¿Registrarlo de todos modos?')) return;
   var folio = prompt('Folio del acuse del SAT:', '');
   if (folio === null) return;
   folio = String(folio).trim();
