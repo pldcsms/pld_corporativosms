@@ -11310,7 +11310,9 @@ function renderDocs() {
         // Debajo de la Constancia CURP: verificacion RENAPO (solo PF Mexicana)
         + ((td==='Constancia CURP' && c.tipo==='PF_MEX') ? renapoBtnHtml(c) : '')
         // Debajo de la identificacion: vigencia de la credencial en el INE (solo PF Mexicana)
-        + ((td==='Identificacion oficial vigente' && c.tipo==='PF_MEX') ? ineBtnHtml(c) : '');
+        + ((td==='Identificacion oficial vigente' && c.tipo==='PF_MEX') ? ineBtnHtml(c) : '')
+        // Debajo del formato de conocimiento: generarlo con los datos del expediente
+        + (td===FCC_TIPO_DOC ? fccBtnHtml(c) : '');
     }
 
     if (oblDocs.length) {
@@ -11335,6 +11337,406 @@ function avisoRegimenSimpHtml(c) {
   return '<div style="margin-bottom:12px;padding:10px 12px;border-left:3px solid var(--am);background:var(--am3);font-size:12px;color:var(--tx1);line-height:1.6">'
     + '<strong>No califica para el regimen simplificado:</strong> la entidad es de riesgo ' + capEsc(c.riesgo || '') + ' y las medidas simplificadas solo aplican a riesgo Bajo (arts. 12 fr. V, 17 y 34 de las Reglas). '
     + 'Ademas de los datos, son obligatorios los documentos marcados abajo.</div>';
+}
+
+// ================================================================
+//  FORMATO DE CONOCIMIENTO DEL CLIENTE (PDF editable para firma)
+// ================================================================
+// Se genera desde la pestana Documentos en cuanto el expediente tiene todos
+// sus datos obligatorios, aunque el cliente siga como prospecto. Lleva los
+// mismos datos que muestra la ficha, cada uno en un campo rellenable para
+// corregirlo antes de firmar, el fundamento legal y los espacios de firma del
+// cliente y del asesor comercial. Se descarga: ya firmado se sube con "Subir"
+// en esta misma fila, que es lo que cuenta para el avance del expediente.
+var FCC_TIPO_DOC = 'Formato de Conocimiento del Cliente';
+var FCC_ANEXO = { PF_MEX: '3', PF_EXT: '5', PM_MEX: '4', PM_SIMP: '7', FIDEICOMISO: '8' };
+var FCC_TIPO_LARGO = {
+  PF_MEX: 'Persona fisica mexicana o extranjera residente', PF_EXT: 'Persona fisica extranjera',
+  PM_MEX: 'Persona moral mexicana', PM_SIMP: 'Persona moral de regimen simplificado', FIDEICOMISO: 'Fideicomiso'
+};
+
+// Si el formato se puede generar y, si no, por que.
+function fccEstado(c) {
+  if (!c) return { ok: false, motivo: 'Expediente no cargado.' };
+  if (c.estatus === 'Bloqueado' || c.bloqueo_scr) return { ok: false, motivo: 'El cliente esta bloqueado: no se genera el formato.' };
+  if (c.estatus === 'Baja') return { ok: false, motivo: 'El cliente esta dado de baja.' };
+  var dd = datosDelExpediente(c);
+  if (!dd) return { ok: false, motivo: 'Los datos obligatorios se miden al guardar el expediente: editalo y guardalo una vez.' };
+  if (dd.faltantes.length) return { ok: false, motivo: 'Faltan datos obligatorios: ' + dd.faltantes.join(', ') + '.' };
+  return { ok: true, motivo: '' };
+}
+
+function fccBtnHtml(c) {
+  var e = fccEstado(c);
+  var contenido = e.ok
+    ? '<button class="btn btn-sm btn-p" onclick="generarFormatoConocimiento()">&#128196; Generar formato para firma</button>'
+      + '<span style="font-size:12px;color:var(--tx3)">PDF editable con los datos del expediente. Firmado, subelo con "Subir".</span>'
+    : '<button class="btn btn-sm" disabled style="opacity:.55;cursor:not-allowed">&#128196; Generar formato para firma</button>'
+      + '<span style="font-size:12px;color:var(--am)">' + capEsc(e.motivo) + '</span>';
+  return '<div style="margin:4px 0 14px;padding:12px 14px;border:1px dashed var(--brd);border-radius:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+    + contenido + '</div>';
+}
+
+// Acentos de las etiquetas de la ficha (se escriben sin ellos en la app).
+var FCC_ACENTOS = [
+  [/\bPais\b/g,'País'],[/\bpais\b/g,'país'],[/\bRazon\b/g,'Razón'],[/\brazon\b/g,'razón'],[/\bTelefono\b/g,'Teléfono'],
+  [/\belectronico\b/g,'electrónico'],[/\bIdentificacion\b/g,'Identificación'],[/\bidentificacion\b/g,'identificación'],
+  [/\bCodigo\b/g,'Código'],[/\bDemarcacion\b/g,'Demarcación'],[/\bdemarcacion\b/g,'demarcación'],[/\bpoblacion\b/g,'población'],
+  [/\bconstitucion\b/g,'constitución'],[/\bOrganizacion\b/g,'Organización'],[/\bDeclaracion\b/g,'Declaración'],
+  [/\bDueno\b/g,'Dueño'],[/\bNum\./g,'Núm.'],[/\bNumero\b/g,'Número'],[/\beconomica\b/g,'económica'],[/\bcreacion\b/g,'creación'],
+  [/\bparticipacion\b/g,'participación'],[/\bComo\b/g,'Cómo'],[/\bCondicion\b/g,'Condición'],[/\bJustificacion\b/g,'Justificación'],
+  [/\bregimen\b/g,'régimen'],[/\badscripcion\b/g,'adscripción'],[/\binstitucion\b/g,'institución'],[/\bdenominacion\b/g,'denominación'],
+  [/\bCedula\b/g,'Cédula'],[/\bVerificacion\b/g,'Verificación'],[/\bfisica\b/g,'física'],
+  [/\bMexico\b/g,'México'],[/\bmaximo\b/g,'máximo'],[/\bOperacion\b/g,'Operación']
+];
+function fccAcentos(s) {
+  var t = String(s || '');
+  FCC_ACENTOS.forEach(function(x){ t = t.replace(x[0], x[1]); });
+  return t;
+}
+
+// Pares etiqueta/valor del HTML de la ficha, en su orden. Los encabezados de
+// bloque (beneficiario controlador #n) se vuelven subtitulos; los enlaces se
+// quitan (no son datos del cliente).
+function fccPares(html) {
+  var d = document.createElement('div');
+  d.innerHTML = html || '';
+  d.querySelectorAll('a').forEach(function(a){ a.remove(); });
+  var out = [];
+  d.querySelectorAll('.bc-hdr, .fc').forEach(function(n){
+    if (n.classList.contains('bc-hdr')) { out.push({ sub: n.textContent.trim() }); return; }
+    var l = n.querySelector('.fc-l'), v = n.querySelector('.fc-v');
+    if (!l || !v) return;
+    v.querySelectorAll('br').forEach(function(b){ b.replaceWith('\n'); });
+    var t = v.textContent.replace(/^[\s·]+|[\s·]+$/g, '');
+    if (t === '-') t = '';
+    var et = l.textContent.trim();
+    if (/RENAPO/i.test(et)) return;   // solo era un enlace de verificacion
+    out.push({ l: fccAcentos(et), v: t });
+  });
+  return out;
+}
+
+// Secciones del formato segun el tipo de cliente.
+function fccSecciones(c) {
+  var s = [];
+  var add = function(titulo, items){ if (items && items.length) s.push({ titulo: titulo, items: items }); };
+  // Datos generales del expediente: lo que pide la primera tarjeta del
+  // formulario de alta (la ficha los muestra en su encabezado, no en una pestana).
+  var esArr = c.es_arrendamiento === 'SI';
+  var ent = ENTIDADES.filter(function(x){ return x.id === c.entidad_id; })[0] || {};
+  var ase = ASESORES.filter(function(a){ return a.id === c.asesor_id; })[0];
+  var exp = [
+    { l: 'Número de cliente', v: nStr(c.num_cliente) },
+    { l: 'Entidad', v: ent.nombre || c.entidad_nombre || c.entidad_id || '' },
+    { l: 'Tipo de persona', v: fccAcentos(FCC_TIPO_LARGO[c.tipo] || labelTipo(c.tipo)) + ' (Anexo ' + (FCC_ANEXO[c.tipo] || '') + ')' },
+    { l: 'Estatus del cliente', v: c.estatus || '' },
+    { l: 'Fecha de alta', v: String(c.fecha_alta || '').substring(0, 10) }
+  ];
+  if (c.fecha_baja) exp.push({ l: 'Fecha de baja', v: String(c.fecha_baja).substring(0, 10) });
+  exp.push({ l: 'Asesor comercial responsable', v: (ase && ase.nombre) || c.asesor_nombre || '' });
+  exp.push({ l: 'Tipo de cliente', v: esArr ? TIPO_CLIENTE_FRAC.SI : TIPO_CLIENTE_FRAC.NO });
+  if (esArr) exp.push({ l: 'Inmueble arrendado / establecimiento', v: c.inmueble_arrendado || '' });
+  else {
+    var inms = inmueblesDe(c);
+    if (inms.length > 1) exp.push({ l: 'Inmuebles', v: inms.map(function(k){ return textoInmueble(k); }).join('\n') });
+    else {
+      exp.push({ l: 'Fraccionamiento', v: c.nombre_fraccionamiento || (inms[0] && inms[0].fraccionamiento) || '' });
+      exp.push({ l: 'Número de lote', v: c.lote_inmueble || (inms[0] && inms[0].lote) || '' });
+    }
+  }
+  add('Datos generales del expediente', exp);
+  var gen = fccPares(renderDatosGenerales(c));
+  if (c.tipo === 'PF_EXT' && c.fecha_venc_estancia) gen.push({ l: 'Fecha de vencimiento de la estancia', v: c.fecha_venc_estancia });
+  add('Datos de identificación', gen);
+  if (c.tipo === 'PF_EXT') {
+    add('Domicilio en el país de residencia', fccPares(renderDomicilio(c, 'res_')));
+    if (c.tiene_dom_mx === 'SI') add('Domicilio en México', fccPares(renderDomicilio(c, 'mx_')));
+  } else {
+    add('Domicilio', fccPares(renderDomicilio(c, '')));
+  }
+  if (c.tipo === 'PM_MEX') add('Representante legal', fccPares(renderRL(c)));
+  if (c.tipo === 'PM_SIMP') add('Representante o funcionario', fccPares(renderRL(c)));
+  if (c.tipo === 'FIDEICOMISO') add('Delegado fiduciario', fccPares(renderDF(c)));
+  if (c.tipo === 'PM_MEX' || c.tipo === 'FIDEICOMISO')
+    add('Beneficiarios controladores', (c.beneficiarios || []).length ? fccPares(renderBCS(c.beneficiarios))
+      : [{ l: 'Beneficiarios controladores', v: 'SIN BENEFICIARIOS CONTROLADORES REGISTRADOS' }]);
+  var db = fccPares(renderDuenBen(c));
+  if (c.tiene_dueno_ben === 'SI' && db.length > 2) db.splice(2, 0, { sub: 'Datos del dueño beneficiario' });
+  add('Dueño beneficiario', db);
+  // Perfil transaccional declarado (el vigente del expediente). El tipo de
+  // cliente y el inmueble ya van en los datos generales.
+  var ptx = [];
+  (esArr ? FILAS_PTX_ARR : FILAS_PTX_CV).forEach(function(f){
+    var v = fmtCampoPtx(f[0], c);
+    if (!v && f[0] === 'razon_opera_mx') return;   // solo aplica a extranjeros
+    ptx.push({ l: fccAcentos(f[1]), v: v === '-' ? '' : v });
+  });
+  add('Perfil transaccional declarado', ptx);
+  return s;
+}
+
+// Quien firma por el cliente.
+function fccFirmante(c) {
+  var nom = function(p){ return [c[p + 'nombre'], c[p + 'ap_pat'], c[p + 'ap_mat']].filter(Boolean).join(' '); };
+  if (c.tipo === 'PF_MEX' || c.tipo === 'PF_EXT') return { titulo: 'FIRMA DEL CLIENTE', nombre: nom(''), cargo: 'Por su propio derecho' };
+  if (c.tipo === 'FIDEICOMISO') return { titulo: 'FIRMA DEL DELEGADO FIDUCIARIO', nombre: nom('df_'), cargo: 'En representación de ' + nombreCliente(c) };
+  return { titulo: 'FIRMA DEL REPRESENTANTE LEGAL', nombre: nom('rl_'), cargo: 'En representación de ' + nombreCliente(c) };
+}
+
+function fccFundamento(c, entNom) {
+  var fr = c.es_arrendamiento === 'SI' ? 'XV' : 'V';
+  return 'Este formato forma parte del expediente único de identificación del cliente y se integra en cumplimiento de los artículos 17, fracción ' + fr
+    + ', y 18, fracciones I, II y III, de la Ley Federal para la Prevención e Identificación de Operaciones con Recursos de Procedencia Ilícita (LFPIORPI), '
+    + 'que obligan a quien realiza actividades vulnerables a identificar a sus clientes y verificar su identidad, a recabar información sobre su actividad u ocupación '
+    + 'y a solicitarles información sobre si tienen conocimiento de la existencia del dueño beneficiario o beneficiario controlador; del artículo 12 del Reglamento de la LFPIORPI; '
+    + 'y del artículo 12 de las Reglas de Carácter General a que se refiere la LFPIORPI y su Anexo ' + (FCC_ANEXO[c.tipo] || '') + ', que establecen los datos y documentos que integran el expediente. '
+    + 'La información y documentación se custodian y conservan en términos del artículo 18, fracción IV, de la LFPIORPI. Los datos personales se tratan conforme a la '
+    + 'Ley Federal de Protección de Datos Personales en Posesión de los Particulares y al aviso de privacidad de ' + entNom + '.';
+}
+
+function cargarPDFLib(cb) {
+  if (window.PDFLib && window.PDFLib.PDFDocument) { cb(); return; }
+  var s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
+  s.onload = cb;
+  s.onerror = function(){ toast('No se pudo cargar el generador de PDF', 'e'); };
+  document.head.appendChild(s);
+}
+
+function generarFormatoConocimiento() {
+  var c = App.clienteActual;
+  var e = fccEstado(c);
+  if (!e.ok) { toast(e.motivo, 'w'); return; }
+  toast('Generando el formato...');
+  cargarPDFLib(function(){
+    if (!(window.PDFLib && window.PDFLib.PDFDocument)) return;
+    construirFormatoConocimientoPDF(c).then(function(bytes){
+      var nom = nombreCliente(c).replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 40);
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      a.download = 'Formato_Conocimiento_Cliente_' + nStr(c.num_cliente) + '_' + nom + '.pdf';
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+      toast('Formato descargado. Firmado, subelo en esta misma fila.', 's');
+    }).catch(function(err){
+      console.error('[FCC]', err);
+      toast('No se pudo generar el formato: ' + (err && err.message || err), 'e');
+    });
+  });
+}
+
+// Arma el PDF con pdf-lib (campos AcroForm rellenables). Devuelve una promesa
+// con los bytes.
+function construirFormatoConocimientoPDF(c) {
+  var P = window.PDFLib, rgb = P.rgb;
+  var PW = 595.28, PH = 841.89, M = 42, W = PW - 2 * M, PIE = 58;
+  var GAP = 12, CW = (W - GAP) / 2;
+  var SZ_L = 6.8, SZ_V = 8.5, LH_V = 10.4;
+  var C_TX = rgb(0.13, 0.13, 0.13), C_TX3 = rgb(0.42, 0.42, 0.42), C_BRD = rgb(0.72, 0.72, 0.72);
+  var C_SEC = rgb(0.92, 0.93, 0.95), C_CAMPO = rgb(0.975, 0.98, 1);
+  var ent = ENTIDADES.filter(function(x){ return x.id === c.entidad_id; })[0] || {};
+  var entNom = ent.nombre || c.entidad_nombre || c.entidad_id || '';
+  var ase = ASESORES.filter(function(a){ return a.id === c.asesor_id; })[0];
+  var asesorNom = (ase && ase.nombre) || c.asesor_nombre || '';
+  var ahora = new Date();
+  var fechaHoy = pad(ahora.getDate()) + '/' + pad(ahora.getMonth() + 1) + '/' + ahora.getFullYear();
+
+  // Solo caracteres que la fuente estandar (WinAnsi) puede dibujar.
+  var WIN = '–—‘’“”•…€';
+  var san = function(s){
+    return String(s == null ? '' : s).replace(/[→⇒]/g, '->').replace(/\r/g, '').split('').filter(function(ch){
+      var k = ch.charCodeAt(0);
+      return ch === '\n' || (k >= 32 && k <= 126) || (k >= 160 && k <= 255) || WIN.indexOf(ch) >= 0;
+    }).join('');
+  };
+
+  return P.PDFDocument.create().then(function(pdf){
+    return Promise.all([pdf.embedFont(P.StandardFonts.Helvetica), pdf.embedFont(P.StandardFonts.HelveticaBold)]).then(function(fs){
+      var F = fs[0], FB = fs[1];
+      var form = pdf.getForm();
+      var nCampo = 0;
+      var pg, y;
+
+      var wrap = function(s, f, size, w){
+        var out = [];
+        san(s).split('\n').forEach(function(par){
+          var ln = '';
+          par.split(/\s+/).filter(Boolean).forEach(function(wd){
+            while (f.widthOfTextAtSize(wd, size) > w) {
+              var k = wd.length;
+              while (k > 1 && f.widthOfTextAtSize(wd.slice(0, k), size) > w) k--;
+              if (ln) { out.push(ln); ln = ''; }
+              out.push(wd.slice(0, k)); wd = wd.slice(k);
+            }
+            if (!wd) return;
+            var t = ln ? ln + ' ' + wd : wd;
+            if (f.widthOfTextAtSize(t, size) <= w) ln = t; else { out.push(ln); ln = wd; }
+          });
+          out.push(ln);
+        });
+        return out.length ? out : [''];
+      };
+      var texto = function(s, x, yy, size, f, color){ pg.drawText(san(s), { x: x, y: yy, size: size, font: f || F, color: color || C_TX }); };
+      var parrafo = function(s, x, w, size, f, color, lh){
+        wrap(s, f || F, size, w).forEach(function(ln){ texto(ln, x, y - size, size, f, color); y -= (lh || size * 1.32); });
+      };
+      var nuevaPagina = function(){
+        pg = pdf.addPage([PW, PH]);
+        y = PH - M;
+        if (pdf.getPageCount() > 1) {
+          texto('FORMATO DE CONOCIMIENTO DEL CLIENTE', M, y - 8, 7.5, FB, C_TX3);
+          var der = 'No. de cliente ' + nStr(c.num_cliente) + '  ·  ' + nombreCliente(c);
+          der = wrap(der, F, 7.5, W * 0.6)[0];
+          texto(der, M + W - F.widthOfTextAtSize(san(der), 7.5), y - 8, 7.5, F, C_TX3);
+          y -= 14;
+          pg.drawLine({ start: { x: M, y: y }, end: { x: M + W, y: y }, thickness: 0.5, color: C_BRD });
+          y -= 10;
+        }
+      };
+      var asegura = function(h){ if (y - h < PIE) nuevaPagina(); };
+      var campo = function(valor, x, yTop, w, h, multi){
+        var tf = form.createTextField('fcc_' + (++nCampo));
+        // En varias lineas, los saltos los pone el formato: el ajuste propio
+        // del visor no coincide con el calculo del alto y cortaba la linea.
+        if (multi) tf.enableMultiline();
+        tf.setText(multi ? wrap(valor, F, SZ_V, w - 10).join('\n') : san(valor));
+        tf.addToPage(pg, { x: x, y: yTop - h, width: w, height: h, font: F, borderWidth: 0.5, borderColor: C_BRD, backgroundColor: C_CAMPO, textColor: C_TX });
+        tf.setFontSize(SZ_V);
+        return tf;
+      };
+      // Alto de un dato (etiqueta + campo) a un ancho dado.
+      var altoDato = function(it, w){
+        var n = Math.max(1, wrap(it.v, F, SZ_V, w - 10).length);
+        return { n: n, h: 9 + n * LH_V + 5 };
+      };
+      var dato = function(it, x, w, yTop, n){
+        texto(it.l, x, yTop - SZ_L, SZ_L, F, C_TX3);
+        campo(it.v, x, yTop - 9, w, n * LH_V + 5, n > 1);
+      };
+      var seccion = function(sec){
+        asegura(18 + 30);
+        pg.drawRectangle({ x: M, y: y - 15, width: W, height: 15, color: C_SEC });
+        texto(sec.titulo.toUpperCase(), M + 6, y - 10.6, 8.2, FB);
+        y -= 21;
+        // Filas: los datos cortos van de dos en dos; los largos, a todo el ancho.
+        var filas = [], par = [];
+        sec.items.forEach(function(it){
+          if (it.sub) { if (par.length) { filas.push(par); par = []; } filas.push([it]); return; }
+          if (altoDato(it, CW).n > 2) { if (par.length) { filas.push(par); par = []; } filas.push([it, null]); return; }
+          par.push(it);
+          if (par.length === 2) { filas.push(par); par = []; }
+        });
+        if (par.length) filas.push(par);
+        filas.forEach(function(f){
+          if (f[0].sub) {
+            asegura(14 + 30);
+            texto(f[0].sub, M, y - 8, 8, FB);
+            y -= 13;
+            return;
+          }
+          if (f.length === 2 && f[1] === null) {   // a todo el ancho
+            var a = altoDato(f[0], W);
+            asegura(a.h + 4);
+            dato(f[0], M, W, y, a.n);
+            y -= a.h + 4;
+            return;
+          }
+          var a0 = altoDato(f[0], CW), a1 = f[1] ? altoDato(f[1], CW) : { n: 0, h: 0 };
+          var n = Math.max(a0.n, a1.n), h = 9 + n * LH_V + 5;
+          asegura(h + 4);
+          dato(f[0], M, CW, y, n);
+          if (f[1]) dato(f[1], M + CW + GAP, CW, y, n);
+          y -= h + 4;
+        });
+        y -= 6;
+      };
+
+      // ── Encabezado ──
+      nuevaPagina();
+      texto(entNom, M, y - 10, 10, FB);
+      if (ent.rfc) texto('RFC: ' + ent.rfc, M, y - 22, 8, F, C_TX3);
+      var r1 = 'No. de cliente: ' + nStr(c.num_cliente), r2 = 'Fecha de elaboración: ' + fechaHoy;
+      texto(r1, M + W - FB.widthOfTextAtSize(san(r1), 8.5), y - 10, 8.5, FB);
+      texto(r2, M + W - F.widthOfTextAtSize(san(r2), 8), y - 22, 8, F, C_TX3);
+      y -= 44;
+      var tit = 'FORMATO DE CONOCIMIENTO DEL CLIENTE';
+      texto(tit, M + (W - FB.widthOfTextAtSize(tit, 15)) / 2, y - 15, 15, FB);
+      y -= 22;
+      var sub = fccAcentos(FCC_TIPO_LARGO[c.tipo] || labelTipo(c.tipo)) + '  ·  Anexo ' + (FCC_ANEXO[c.tipo] || '') + ' de las Reglas de Carácter General de la LFPIORPI'
+        + '  ·  ' + (c.es_arrendamiento === 'SI' ? 'Arrendamiento (art. 17, fr. XV)' : 'Compraventa de inmuebles (art. 17, fr. V)');
+      wrap(sub, F, 8, W).forEach(function(ln){ texto(ln, M + (W - F.widthOfTextAtSize(ln, 8)) / 2, y - 8, 8, F, C_TX3); y -= 11; });
+      y -= 6;
+
+      // ── Fundamento legal ──
+      var fund = wrap(fccFundamento(c, entNom), F, 7.3, W - 16);
+      var hF = 20 + fund.length * 9.4 + 6;
+      pg.drawRectangle({ x: M, y: y - hF, width: W, height: hF, borderColor: C_BRD, borderWidth: 0.6, color: rgb(0.985, 0.985, 0.985) });
+      texto('FUNDAMENTO LEGAL', M + 8, y - 13, 7.8, FB);
+      y -= 22;
+      fund.forEach(function(ln){ texto(ln, M + 8, y - 7.3, 7.3, F, C_TX); y -= 9.4; });
+      y -= 18;
+
+      parrafo('Los datos se tomaron del expediente del cliente. Cada dato está en un campo editable: revíselos y corrija lo necesario antes de firmar.', M, W, 7.5, F, C_TX3);
+      y -= 8;
+
+      fccSecciones(c).forEach(seccion);
+
+      // ── Declaracion y firmas (en una sola pagina) ──
+      var decl = 'Declaro bajo protesta de decir verdad que los datos asentados en este formato son verdaderos y están completos, que los documentos que entrego '
+        + 'para integrar mi expediente son auténticos, que la declaración sobre la existencia del dueño beneficiario es correcta y que los recursos con los que '
+        + 'realizaré las operaciones son de procedencia lícita. Me obligo a informar a ' + entNom + ' cualquier cambio en esta información.';
+      var declA = 'El asesor comercial hace constar que recabó estos datos directamente del cliente y que tuvo a la vista los documentos originales con los que se cotejaron.';
+      var lD = wrap(decl, F, 8, W), lA = wrap(declA, F, 7.5, W);
+      var hFirmas = 24 + lD.length * 10.6 + 10 + lA.length * 9.8 + 16 + 34 + 100;
+      asegura(hFirmas);
+      pg.drawRectangle({ x: M, y: y - 15, width: W, height: 15, color: C_SEC });
+      texto('DECLARACIÓN Y FIRMAS', M + 6, y - 10.6, 8.2, FB);
+      y -= 24;
+      lD.forEach(function(ln){ texto(ln, M, y - 8, 8, F); y -= 10.6; });
+      y -= 10;
+      lA.forEach(function(ln){ texto(ln, M, y - 7.5, 7.5, F, C_TX3); y -= 9.8; });
+      y -= 16;
+      // Lugar y fecha
+      texto('Lugar', M, y - SZ_L, SZ_L, F, C_TX3);
+      campo('', M, y - 9, CW, LH_V + 5, false);
+      texto('Fecha', M + CW + GAP, y - SZ_L, SZ_L, F, C_TX3);
+      campo(fechaHoy, M + CW + GAP, y - 9, CW, LH_V + 5, false);
+      y -= 34;
+      // Firmas: cliente (o su representante) y asesor comercial
+      var fir = fccFirmante(c);
+      var bloqueFirma = function(x, titulo, nombre, cargo){
+        var yT = y;
+        pg.drawRectangle({ x: x, y: yT - 52, width: CW, height: 52, borderColor: C_BRD, borderWidth: 0.5 });
+        pg.drawLine({ start: { x: x + 16, y: yT - 42 }, end: { x: x + CW - 16, y: yT - 42 }, thickness: 0.7, color: C_TX });
+        texto(titulo, x + (CW - FB.widthOfTextAtSize(titulo, 7.5)) / 2, yT - 49.5, 7.5, FB);
+        texto('Nombre', x, yT - 58 - SZ_L, SZ_L, F, C_TX3);
+        campo(nombre, x, yT - 67, CW, LH_V + 5, false);
+        texto(wrap(cargo, F, 7, CW)[0], x, yT - 92, 7, F, C_TX3);
+      };
+      bloqueFirma(M, fir.titulo, fir.nombre, fccAcentos(fir.cargo));
+      bloqueFirma(M + CW + GAP, 'FIRMA DEL ASESOR COMERCIAL', asesorNom, 'Asesor comercial que atiende al cliente');
+      y -= 100;
+
+      // ── Pie de pagina ──
+      var pags = pdf.getPages(), tot = pags.length;
+      var gen = 'Generado por PLD Corporativo SMS el ' + fechaHoy + ' ' + pad(ahora.getHours()) + ':' + pad(ahora.getMinutes())
+        + (App.cuenta ? ' por ' + (App.cuenta.name || App.cuenta.username || '') : '') + '.';
+      pags.forEach(function(p, i){
+        p.drawLine({ start: { x: M, y: 40 }, end: { x: M + W, y: 40 }, thickness: 0.5, color: C_BRD });
+        p.drawText(san(wrap(gen, F, 6.8, W * 0.72)[0]), { x: M, y: 30, size: 6.8, font: F, color: C_TX3 });
+        var t = 'Página ' + (i + 1) + ' de ' + tot;
+        p.drawText(t, { x: M + W - F.widthOfTextAtSize(t, 6.8), y: 30, size: 6.8, font: F, color: C_TX3 });
+      });
+
+      form.updateFieldAppearances(F);
+      pdf.setTitle('Formato de Conocimiento del Cliente - ' + san(nombreCliente(c)));
+      pdf.setSubject('Expediente ' + nStr(c.num_cliente));
+      pdf.setAuthor(san(entNom));
+      pdf.setCreator('PLD Corporativo SMS');
+      return pdf.save();
+    });
+  });
 }
 
 function subirDoc(input, tipoDoc, carpeta) {
