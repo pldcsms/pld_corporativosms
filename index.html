@@ -4618,7 +4618,7 @@ function ebrMatrizReglasHtml() {
       + g.titulo + '<span style="font-weight:400;color:var(--tx3);margin-left:8px">' + g.nota + '</span></td></tr>';
     rs.forEach(function(r){
       filas += '<tr><td style="font-size:13px;color:var(--tx2);min-width:240px">' + capEsc(textoRegla(r, op, cfg))
-        + (r.n ? '<div style="font-size:11px;color:var(--tx3)">' + capEsc(r.n) + '</div>' : '')
+        + (notaRegla(r, op) ? '<div style="font-size:11px;color:var(--tx3)">' + capEsc(notaRegla(r, op)) + '</div>' : '')
         + (etiquetaRegla(r.id) ? '<div style="font-size:11px;color:var(--az)">' + capEsc(etiquetaRegla(r.id)) + '</div>' : '') + '</td>';
       cols.forEach(function(t){
         if (!reglaAplica(r, op, t)) {
@@ -5174,7 +5174,7 @@ function ebrSimMock() {
   if (esArr) {
     mock.ptx_arr_efectivo = ['NUNCA', 'OCASIONAL', 'HABITUAL', 'HABITUAL'][ef];
     mock.ptx_arr_origen = v('sim-origen');
-    mock.renta_moneda = v('sim-moneda') === 'MXN' ? 'MXN' : 'USD';
+    mock.renta_moneda = monedaRenta({ renta_moneda: v('sim-moneda') });
     mock.ptx_arr_numops = vol ? 'VARIAS' : 'UNA';
     mock.ptx_arr_frec = v('sim-frec');
     mock.ptx_arr_pago = v('sim-contra') === 'TERCEROS' ? 'TRANSF_TERCEROS' : 'TRANSF_PROPIA';
@@ -6746,7 +6746,7 @@ function observadoReval(ops) {
 // de desviaciones entre una cosa y otra.
 function aplicarObservadoReval(c, ob) {
   var d = JSON.parse(JSON.stringify(c)), desv = [];
-  if (!ob.n) return { datos: d, desv: desv };
+  if (!ob.n) return { datos: d, desv: desv, campos: null };
   var mas = function(orden, a, b){ return orden.indexOf(a) > orden.indexOf(b); };
   var pesos = function(v){ return '$' + Math.round(v).toLocaleString('es-MX'); };
   var pct = pctDesviacionDe(c);
@@ -6773,7 +6773,8 @@ function aplicarObservadoReval(c, ob) {
 
     var monDecl = c.renta_moneda === 'USD' ? 'USD' : 'MXN';
     if (ob.moneda !== monDecl) desv.push('Pagos en ' + (ob.moneda === 'OTRA' ? 'otra divisa' : ob.moneda) + '; la renta se declaro en ' + monDecl);
-    d.renta_moneda = ob.moneda === 'MXN' ? 'MXN' : 'USD';
+    // Solo en esta copia para el calculo: el declarado nunca guarda otra divisa.
+    d.renta_moneda = ob.moneda;
   } else {
     var decl = parseFloat(c.ptx_cv_efectivo_mxn) || 0;
     if (ob.efectivoMXN > 0 && ob.efectivoMXN > decl * (1 + pct / 100))
@@ -6803,7 +6804,14 @@ function aplicarObservadoReval(c, ob) {
     if (esArrT) d.ptx_arr_pago = obsTerc ? 'TRANSF_TERCEROS' : (c.ptx_arr_pago === 'TRANSF_TERCEROS' ? 'TRANSF_PROPIA' : c.ptx_arr_pago);
     else d.ptx_cv_contrapartes = obsTerc ? 'TERCEROS' : 'PROPIAS';
   }
-  return { datos: d, desv: desv };
+  // Los campos del perfil que se tomaron de lo observado, para guardarlos con
+  // la revaloracion (reval_obs). Quien paga solo entra si las operaciones
+  // traian el dato; si no, sigue mandando lo declarado.
+  var esArrC = c.es_arrendamiento === 'SI', campos = {};
+  (esArrC ? ['ptx_arr_efectivo', 'ptx_arr_numops', 'ptx_arr_frec', 'renta_moneda']
+          : ['ptx_cv_efectivo_mxn', 'ptx_cv_numops', 'ptx_cv_moneda']).forEach(function(k){ campos[k] = d[k]; });
+  if (ob.pagoConDato) { var kPago = esArrC ? 'ptx_arr_pago' : 'ptx_cv_contrapartes'; campos[kPago] = d[kPago]; }
+  return { datos: d, desv: desv, campos: campos };
 }
 
 function evaluarReval(c, ops) {
@@ -6830,13 +6838,17 @@ function evaluarReval(c, ops) {
   var efExcCv = c.es_arrendamiento !== 'SI' && limC > 0 && Object.keys(porInm).some(function(k){ return porInm[k] >= limC; });
   if (efExcCv) ap.desv.push('Efectivo o metales preciosos de 8,025 UMA o mas para un mismo inmueble (art. 32 fr. I LFPIORPI): pago prohibido');
   efExc = efExc || efExcCv;
-  ap.datos._reval = { desv: ap.desv.length > 0, efNoDecl: ob.efectivoN > 0 && sinEfDecl, maxMesMXN: ob.n ? ob.maxMesMXN : undefined,
-                      instAlto: (instObs && instObs !== 'NINGUNO') ? instObs : undefined, efExcede: efExc || undefined };
+  var marcas = { desv: ap.desv.length > 0, efNoDecl: ob.efectivoN > 0 && sinEfDecl, maxMesMXN: ob.n ? ob.maxMesMXN : undefined,
+                 instAlto: (instObs && instObs !== 'NINGUNO') ? instObs : undefined, efExcede: efExc || undefined };
+  ap.datos._reval = marcas;
   var r = calcEBR(ap.datos);
   var ant = c.riesgo || '';
   var ia = NIVELES_EBR.indexOf(ant), in_ = NIVELES_EBR.indexOf(r.nivel);
   var cambio = ia < 0 ? 'nuevo' : in_ > ia ? 'sube' : in_ < ia ? 'baja' : 'igual';
-  return { c: c, ob: ob, desv: ap.desv, res: r, anterior: ant, cambio: cambio, fuente: ob.n ? 'observado' : 'declarado', registro: null };
+  // obs: lo observado que sostuvo este nivel. Se guarda en el expediente para
+  // que una edicion posterior recalcule con lo mismo (ver conObservadoReval).
+  return { c: c, ob: ob, desv: ap.desv, res: r, anterior: ant, cambio: cambio, fuente: ob.n ? 'observado' : 'declarado', registro: null,
+           obs: (ob.n && ap.campos) ? { campos: ap.campos, marcas: marcas } : null };
 }
 
 // Aviso del panel principal: el ciclo en curso tiene clientes sin revalorar.
@@ -7034,7 +7046,8 @@ function verReval(i) {
     + (!reg && e.operado && e.operado.n
         ? '<div style="margin:10px 0;padding:10px 12px;border:1px solid var(--brd);border-radius:var(--r)">'
           + '<div style="font-size:13px;font-weight:600;margin-bottom:4px">Actualizar el perfil declarado con lo operado</div>'
-          + '<div style="font-size:12px;color:var(--tx3);margin-bottom:6px">Reemplaza en el perfil vigente los campos que se observan en las operaciones. El perfil original no cambia y el cambio queda en el historial (art. 23 Ter 1).</div>'
+          + '<div style="font-size:12px;color:var(--tx3);margin-bottom:6px">Reemplaza en el perfil vigente los campos que se observan en las operaciones. El perfil original no cambia y el cambio queda en el historial (art. 23 Ter 1).'
+          + (e.operado.campos.renta_moneda === 'OTRA' ? ' La moneda de la renta no se actualiza: el perfil declarado solo admite pesos o dolares.' : '') + '</div>'
           + '<textarea class="txa" id="reval-ptx-just" rows="2" style="width:100%" placeholder="Justificacion (obligatoria)"></textarea>'
           + '<div style="margin-top:6px"><button class="btn" onclick="actualizarPerfilConOperado(' + i + ')">Actualizar perfil declarado</button></div></div>'
         : '')
@@ -7054,7 +7067,12 @@ function actualizarPerfilConOperado(i) {
   var c = e.c, antes = JSON.parse(JSON.stringify(c)), c2 = JSON.parse(JSON.stringify(c));
   asegurarPerfilOriginal(c2, antes);
   activarDDR(c2, antes);
-  Object.keys(e.operado.campos).forEach(function(k){ c2[k] = e.operado.campos[k]; });
+  // El perfil declarado de arrendamiento solo admite pesos o dolares: una renta
+  // pagada en otra divisa se queda como operada y no pasa al declarado.
+  Object.keys(e.operado.campos).forEach(function(k){
+    if (k === 'renta_moneda' && e.operado.campos[k] === 'OTRA') return;
+    c2[k] = e.operado.campos[k];
+  });
   c2.perfil_tx_actualizado = { fecha: hoy(), usuario: App.cuenta ? App.cuenta.username : '', ciclo: R.ciclo.clave, justificacion: just };
   pensador('Actualizando el perfil declarado...');
   spUpdate('PLD_Clientes', c.id, c2, function(res){
@@ -7127,6 +7145,9 @@ function guardarReval(e, texto, cb) {
     activarDDR(c2, c);
     asegurarPerfilOriginal(c2, c);
     if (e.operado) c2.perfil_operado_ult = Object.assign({ ciclo: cic.clave }, e.operado);
+    // Lo observado que sostuvo el nivel queda con el expediente hasta la
+    // siguiente revaloracion; sin operaciones en la ventana, se limpia.
+    c2.reval_obs = e.obs ? { ciclo: cic.clave, fecha: hoy(), op: c.es_arrendamiento === 'SI' ? 'arr' : 'cv', campos: e.obs.campos, marcas: e.obs.marcas } : '';
     c2.ciclo_ult_revaluacion = cic.clave;
     c2.fecha_ult_revaluacion = hoy();
     var antesReval = JSON.parse(JSON.stringify(c));
@@ -7537,13 +7558,20 @@ function calcEBRCliente(d) {
 
 // Que opcion del perfil transaccional cae en cada factor. Se separa del calculo
 // para que el simulador y la pantalla usen exactamente la misma lectura.
+// Moneda de la renta para el modelo. El perfil declarado de arrendamiento solo
+// admite pesos o dolares; 'OTRA' llega unicamente con lo observado en la
+// revaloracion, porque las operaciones si pueden pagarse en otra divisa.
+function monedaRenta(d) {
+  var m = d && d.renta_moneda;
+  return (m === 'USD' || m === 'OTRA') ? m : 'MXN';
+}
 function factoresTxEBR(d) {
   if (d.es_arrendamiento === 'SI') {
     return {
       arr: true,
       efectivo: ['efectivo', d.ptx_arr_efectivo],
       origen: ['origen', d.ptx_arr_origen],
-      moneda: ['moneda', d.renta_moneda === 'USD' ? 'USD' : 'MXN'],
+      moneda: ['moneda', monedaRenta(d)],
       volumen: ['volumen_arr', d.ptx_arr_numops],
       frecuencia: ['frecuencia', d.ptx_arr_frec],
       contrapartes: ['contrapartes', d.ptx_arr_pago === 'TRANSF_TERCEROS' ? 'TERCEROS'
@@ -7625,7 +7653,9 @@ var R_AMB = ['cv', 'arr'], R_C3 = ['PF', 'PM', 'FID'], R_C4 = ['PF', 'PM', 'FID'
 // ops: en que matriz existe la regla. tipos: a que personas aplica (un guion en
 // la matriz cuando el expediente de ese tipo no tiene el dato). d: dato del
 // perfil que explica por que se cumplio. t: texto, uno por operacion o una
-// funcion de la configuracion cuando lleva un parametro.
+// funcion de la configuracion cuando lleva un parametro. n: nota bajo el texto
+// en la matriz, una para las dos operaciones o una por operacion.
+var NOTA_DIVISA_ARR = 'El perfil declarado de arrendamiento solo admite pesos o dólares: la regla se alcanza en la revaloración, cuando las operaciones se pagaron en otra divisa';
 var REGLAS_EBR = [
   { id: 'pep_afr', g: 'pep', ops: R_AMB, tipos: R_C4, def: 'Medio', d: 'pep', t: 'PEP activo, inactivo, familiar o relacionado', c: function(p){ return p.pepAFR; } },
   { id: 'pep_iv', g: 'pep', ops: R_AMB, tipos: R_C4, def: 'Bajo', d: 'pep', t: 'PEP vencido', c: function(p){ return p.pepVencido && !p.pepAFR; } },
@@ -7635,6 +7665,10 @@ var REGLAS_EBR = [
   { id: 'pep_ext', g: 'pep', ops: R_AMB, tipos: R_C4, def: 'Alto', t: 'PEP extranjero, en cualquier estatus', n: 'Campo "El PEP es extranjero" del expediente', c: function(p){ return p.pepExt; } },
 
   { id: 'geo_csnu', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', d: 'csnu', t: 'País con sanciones del Consejo de Seguridad en domicilio, nacionalidad, nacimiento o constitución', c: function(p){ return p.csnu; } },
+  // El alta de estos clientes se bloquea por politica (vinculosProhibidos); la
+  // regla existe para el cliente ya registrado cuyo pais entra despues a la
+  // lista, que de otro modo quedaria sin ninguna regla geografica.
+  { id: 'geo_cm', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', d: 'cm', t: 'País con llamado del GAFI a aplicar contramedidas, del cliente o de una persona relacionada', n: 'El alta se bloquea por política: la regla alcanza al cliente ya registrado cuyo país entra después a la lista', c: function(p){ return p.cm; } },
   { id: 'geo_vig', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', n: 'Alto por el artículo 23 Bis 4', d: 'vig', t: 'País en la lista gris del GAFI en domicilio, nacionalidad, nacimiento o constitución', c: function(p){ return p.vig; } },
   { id: 'geo_fiscal', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', n: 'Alto por el artículo 23 Bis 4', d: 'fiscal', t: 'Régimen fiscal preferente en domicilio, nacionalidad, nacimiento o constitución', c: function(p){ return p.fiscal; } },
   { id: 'geo_roja', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Agravante', d: 'banda', t: 'Domicilio en estado de banda roja, sin PEP activo, inactivo, familiar o relacionado', c: function(p){ return p.banda === 'roja' && !p.pepAFR; } },
@@ -7656,7 +7690,7 @@ var REGLAS_EBR = [
   { id: 'arr_ef_hab', g: 'tx', ops: ['arr'], tipos: R_C4, def: 'Medio', t: 'Renta pagada en efectivo de forma habitual', c: function(p){ return p.ef === 'habitual'; } },
   { id: 't_otro', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Medio', t: 'Origen de los recursos "Otro"', c: function(p){ return p.origen === 'OTRO'; } },
   { id: 't_her', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Agravante', t: 'Origen por herencia, donación o préstamo', c: function(p){ return p.origen === 'HERENCIA' || p.origen === 'PRESTAMO'; } },
-  { id: 't_div', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Medio', t: 'Pago en una divisa distinta de pesos o dólares', c: function(p){ return p.moneda === 'OTRA'; } },
+  { id: 't_div', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Medio', t: 'Pago en una divisa distinta de pesos o dólares', n: { arr: NOTA_DIVISA_ARR }, c: function(p){ return p.moneda === 'OTRA'; } },
   { id: 't_usd', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Agravante', t: 'Pago en dólares', c: function(p){ return p.moneda === 'USD'; } },
   { id: 't_terc', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Medio', t: { cv: 'Precio pagado desde cuentas de terceros', arr: 'Renta pagada por un tercero' }, c: function(p){ return p.terceros; } },
   { id: 't_inst', g: 'tx', ops: R_AMB, tipos: R_C4, def: 'Medio', d: 'inst', t: 'Pago con activos virtuales, metales preciosos o cheques de viajero', n: 'Lo declarado en el perfil o, al revalorar, lo operado', c: function(p){ return p.instAlto; } },
@@ -7666,7 +7700,7 @@ var REGLAS_EBR = [
 
   { id: 'c_ef_terc', g: 'ct', ops: R_AMB, tipos: R_C4, def: 'Alto', t: 'Cualquier uso de efectivo con pagos de terceros', c: function(p){ return p.ef !== 'nunca' && p.terceros; } },
   { id: 'c_ef_otro', g: 'ct', ops: R_AMB, tipos: R_C4, def: 'Alto', t: { cv: 'Efectivo por la mitad del límite o más, con origen "Otro"', arr: 'Efectivo habitual con origen "Otro"' }, c: function(p){ return (p.ef === 'mitad' || p.ef === 'excede' || p.ef === 'habitual') && p.origen === 'OTRO'; } },
-  { id: 'c_div_terc', g: 'ct', ops: R_AMB, tipos: R_C4, def: 'Alto', t: 'Otra divisa con pagos de terceros', c: function(p){ return p.moneda === 'OTRA' && p.terceros; } },
+  { id: 'c_div_terc', g: 'ct', ops: R_AMB, tipos: R_C4, def: 'Alto', t: 'Otra divisa con pagos de terceros', n: { arr: NOTA_DIVISA_ARR }, c: function(p){ return p.moneda === 'OTRA' && p.terceros; } },
   // Articulo 23 Bis 3: lo que opera el PEP nacional debe corresponder con su
   // ingreso. En el alta se compara el monto maximo mensual declarado; en la
   // revaloracion, el mes mas alto operado.
@@ -7687,7 +7721,7 @@ var ELEMENTOS_RIESGO = { a: 'Actos u operaciones', b: 'Tipo de clientes', c: 'Pa
 var DELITOS_RIESGO = { LD: 'Lavado (art. 400 Bis)', FT: 'Financiamiento al terrorismo (art. 139 Quater)' };
 var ETIQUETAS_REGLA = {
   pep_afr: ['b', 'LD'], pep_iv: ['b', 'LD'], pep_roja: ['b', 'LD'], pep_inter: ['b', 'LD'], pep_db: ['b', 'LD'], pep_ext: ['b', 'LD'],
-  geo_csnu: ['c', 'LD,FT'], geo_vig: ['c', 'LD,FT'], geo_fiscal: ['c', 'LD'], geo_roja: ['c', 'LD'], geo_ext: ['c', 'LD'], geo_rel: ['c', 'LD,FT'],
+  geo_csnu: ['c', 'LD,FT'], geo_cm: ['c', 'LD,FT'], geo_vig: ['c', 'LD,FT'], geo_fiscal: ['c', 'LD'], geo_roja: ['c', 'LD'], geo_ext: ['c', 'LD'], geo_rel: ['c', 'LD,FT'],
   act: ['b', 'LD'], db: ['b', 'LD'], osfl: ['b', 'FT'], pm_joven: ['b', 'LD'], fid_joven: ['b', 'LD'], edad: ['b', 'LD'],
   c_pm_db: ['b', 'LD'],
   cv_ef_menor: ['a', 'LD,FT'], cv_ef_mitad: ['a', 'LD,FT'], arr_ef_ocas: ['a', 'LD,FT'], arr_ef_hab: ['a', 'LD,FT'],
@@ -7722,6 +7756,7 @@ function textoRegla(r, op, cfg) {
   var t = (typeof r.t === 'function' || typeof r.t === 'string') ? r.t : r.t[op];
   return typeof t === 'function' ? t(cfg || cfgReglas()) : t;
 }
+function notaRegla(r, op) { return (r.n && typeof r.n === 'object') ? (r.n[op] || '') : (r.n || ''); }
 function modeloEBRActivo() { return CFG_EBR.modelo_activo === 'puntos' ? 'puntos' : 'reglas'; }
 function tipoRegla(tipo) {
   return (tipo === 'PF_MEX' || tipo === 'PF_EXT') ? 'PF' : tipo === 'PM_SIMP' ? 'SIMP' : tipo === 'FIDEICOMISO' ? 'FID' : 'PM';
@@ -7841,11 +7876,12 @@ function perfilRiesgo(d) {
   } else if (p.tipo === 'PM') {
     campos.push(['país de constitución', paises.nacionalidad]);
   }
-  var hit = { csnu: [], vig: [], fiscal: [], ext: [] };
+  var hit = { csnu: [], cm: [], vig: [], fiscal: [], ext: [] };
   campos.forEach(function(c){
     if (!c[1] || normPais(c[1]) === 'MEXICO') return;
     var cats = jurisdiccionesDe(c[1]), txt = c[0] + ', ' + c[1], usado = false;
     if (cats.indexOf('csnu_sanciones') >= 0) { hit.csnu.push(txt); usado = true; }
+    if (cats.indexOf('gafi_contramedidas') >= 0) { hit.cm.push(txt); usado = true; }
     if (cats.indexOf('gafi_vigilancia') >= 0) { hit.vig.push(txt); usado = true; }
     if (cats.indexOf('regimen_fiscal') >= 0) { hit.fiscal.push(txt); usado = true; }
     // "Sin listas" es solo un pais que no aparece en ninguna lista.
@@ -7859,6 +7895,10 @@ function perfilRiesgo(d) {
   });
   p.relGeo = rel.length > 0;
   p.det.rel = rel.map(function(v){ return v.parte + ', ' + v.campo + ', ' + v.pais; }).join('; ');
+  // Contramedidas del GAFI: las mismas personas relacionadas que bloquean el alta.
+  if (p.tipo !== 'SIMP') vinculosProhibidosPartes(d).forEach(function(v){ hit.cm.push(v.parte + ', ' + v.campo + ', ' + v.pais); });
+  p.cm = hit.cm.length > 0;
+  p.det.cm = hit.cm.join('; ');
 
   // Estructura.
   p.db = d.tiene_dueno_ben === 'SI';
@@ -7875,7 +7915,7 @@ function perfilRiesgo(d) {
   if (p.op === 'arr') {
     p.ef = { OCASIONAL: 'ocasional', HABITUAL: 'habitual' }[d.ptx_arr_efectivo] || 'nunca';
     p.origen = d.ptx_arr_origen || '';
-    p.moneda = d.renta_moneda === 'USD' ? 'USD' : 'MXN';
+    p.moneda = monedaRenta(d);
     p.terceros = d.ptx_arr_pago === 'TRANSF_TERCEROS';
     p.volumen = d.ptx_arr_numops === 'VARIAS';
     p.anual = d.ptx_arr_frec === 'ANUAL';
@@ -7927,8 +7967,39 @@ function calcEBRReglas(d) {
            reglas: cumplidas, motivo: motivo, op: p.op, tipo: p.tipo };
 }
 
+// Lo observado en la ultima revaloracion (reval_obs) sigue contando hasta la
+// siguiente: sin esto, cualquier recalculo posterior (una edicion del
+// expediente, una resolucion de screening) volveria a lo declarado y borraria
+// el nivel que fijo la revaloracion. No aplica si el expediente cambio de
+// operacion (compraventa o arrendamiento) despues de revalorarse.
+function obsRevalVigente(d) {
+  var ro = d && d.reval_obs;
+  if (!ro || !ro.ciclo || !ro.campos) return null;
+  if ((ro.op === 'arr') !== (d.es_arrendamiento === 'SI')) return null;
+  return ro;
+}
+// Copia del expediente con lo observado en lugar de lo declarado. La propia
+// revaloracion ya trae _reval con lo de su ventana y no se toca.
+function conObservadoReval(d) {
+  if (!d || d._reval !== undefined) return d;
+  var ro = obsRevalVigente(d);
+  if (!ro) return d;
+  var d2 = Object.assign({}, d, ro.campos);
+  d2._reval = ro.marcas || {};
+  return d2;
+}
+function nombreCicloReval(clave) {
+  var p = String(clave || '').split('-');
+  return (p.length === 2 && MESES_REVAL[+p[1] - 1]) ? MESES_REVAL[+p[1] - 1] + ' de ' + p[0] : String(clave || '');
+}
+
 // Nivel de riesgo del cliente con el modelo activo en la configuracion.
-function calcEBR(d) { return modeloEBRActivo() === 'puntos' ? calcEBRPuntos(d) : calcEBRReglas(d); }
+function calcEBR(d) {
+  var d2 = conObservadoReval(d);
+  var r = modeloEBRActivo() === 'puntos' ? calcEBRPuntos(d2) : calcEBRReglas(d2);
+  if (d2 !== d) r.observado_ciclo = d.reval_obs.ciclo;
+  return r;
+}
 
 // Copia el resultado al expediente con lo necesario para explicar el nivel sin
 // recalcular: en el modelo por reglas, las reglas que se cumplieron y los
@@ -8672,7 +8743,7 @@ function perfilOperado(c, ob, desde, hasta) {
     p.campos.ptx_arr_numops = (ob.n > ob.numMeses || (ob.contratos || []).length >= 2) ? 'VARIAS' : 'UNA';
     if (ob.pagoConDato) p.campos.ptx_arr_pago = ob.terceros ? 'TRANSF_TERCEROS' : (ob.pagoConDato === ob.n ? 'TRANSF_PROPIA' : c.ptx_arr_pago);
     p.campos.ptx_arr_frec = ob.numMeses >= 4 ? 'MENSUAL' : ob.numMeses >= 2 ? 'TRIMESTRAL' : (c.ptx_arr_frec === 'ANUAL' ? 'ANUAL' : 'SEMESTRAL');
-    p.campos.renta_moneda = ob.moneda === 'MXN' ? 'MXN' : 'USD';
+    p.campos.renta_moneda = ob.moneda;
   } else {
     p.campos.ptx_cv_efectivo_mxn = r2(ob.efectivoMXN);
     p.campos.ptx_cv_numops = ob.n > 5 ? '5_MAS' : ob.n >= 2 ? '2_5' : '1';
@@ -8692,7 +8763,7 @@ function fmtCampoPtx(k, o) {
               ptx_arr_origen: PTX_ORIGEN, ptx_cv_pago: PTX_CV_PAGO, ptx_cv_numops: PTX_CV_NUMOPS, ptx_cv_moneda: PTX_MONEDA,
               ptx_cv_contrapartes: PTX_CONTRAPARTES, ptx_cv_origen: PTX_ORIGEN, razon_opera_mx: RAZON_OPERA_MX }[k];
   if (k === 'renta_monto' || k === 'ptx_cv_efectivo_mxn' || k === 'ptx_monto_max_mensual' || k === 'pep_ingreso_mensual') return fmtMXN(v);
-  if (k === 'renta_moneda') return v === 'USD' ? 'USD - Dolares' : 'MXN - Pesos';
+  if (k === 'renta_moneda') return v === 'OTRA' ? 'Otra divisa' : v === 'USD' ? 'USD - Dolares' : 'MXN - Pesos';
   if (k === 'es_arrendamiento') return TIPO_CLIENTE_FRAC[v] || String(v);
   if (k === 'ptx_inst_alto') return ptxEtiqueta(INST_ALTO, v);
   if (k === 'canal_operacion') return ptxEtiqueta(CANALES_OPERACION, v) + (v === 'INTERMEDIARIO' && o.canal_intermediario ? ': ' + o.canal_intermediario : '');
@@ -8758,6 +8829,7 @@ function registrarHistorialRiesgo(origen, anterior, actual, extra) {
     modelo: actual.riesgo_modelo || '', motivo: actual.riesgo_motivo || '',
     reglas: (actual.riesgo_reglas || []).map ? (actual.riesgo_reglas || []).map(function(x){ return x.t + (x.det ? ' (' + x.det + ')' : '') + ': ' + x.nv; }) : [],
     agravantes: actual.riesgo_agravantes !== undefined ? actual.riesgo_agravantes : '',
+    observado_ciclo: (obsRevalVigente(actual) || {}).ciclo || '',
     perfil_tx: perfilTxDe(actual), perfil_cambios: camb
   };
   Object.keys(extra || {}).forEach(function(k){ r[k] = extra[k]; });
@@ -10291,7 +10363,7 @@ function submitCliente(tipo, idEx) {
   if (idEx) (App.clientes || []).forEach(function(x){ if (String(x.id) === String(idEx)) _orig = x; });
   if (_orig) {
     ['scr_resoluciones','pep_origen','pep_confirmado_por','pep_confirmado_fecha','bloqueo_scr',
-     'ciclo_ult_revaluacion','fecha_ult_revaluacion','curp_qr_url','curp_folio','curp_constancia_fecha','id_cif','rfc_qr_url',
+     'ciclo_ult_revaluacion','fecha_ult_revaluacion','reval_obs','curp_qr_url','curp_folio','curp_constancia_fecha','id_cif','rfc_qr_url',
      'perfil_tx_original','perfil_operado_ult','perfil_tx_actualizado','ddr','contratos_arr','inmuebles_cv','aprobado_por','aprobado_cargo','fecha_aprobacion'
     ].forEach(function(k){
       if ((datos[k] === undefined || datos[k] === '') && _orig[k] !== undefined) datos[k] = _orig[k];
@@ -10547,6 +10619,10 @@ function renderFicha(c) {
     +(c.asesor_nombre?' · <span style="color:var(--az)">Asesor: '+c.asesor_nombre+'</span>':'')+'</div>'
     +(c.riesgo_modelo === 'reglas'
         ? '<div style="margin-top:8px;max-width:900px">'+htmlReglasRiesgo(c.riesgo_reglas, c.riesgo_agravantes, c.riesgo_subio, cfgReglas().umbral_agravantes)+'</div>'
+        : '')
+    +(obsRevalVigente(c)
+        ? '<div style="font-size:12px;color:var(--tx3);margin-top:6px;max-width:900px">El nivel toma el perfil transaccional operado en la revaloración de '
+          +capEsc(nombreCicloReval(c.reval_obs.ciclo))+', no el declarado. Vale hasta la siguiente revaloración.</div>'
         : '')
     +'</div>'
     +'<div style="display:flex;gap:8px">'
