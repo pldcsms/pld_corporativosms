@@ -7673,6 +7673,7 @@ var REGLAS_EBR = [
   { id: 'geo_fiscal', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', n: 'Alto por el artículo 23 Bis 4', d: 'fiscal', t: 'Régimen fiscal preferente en domicilio, nacionalidad, nacimiento o constitución', c: function(p){ return p.fiscal; } },
   { id: 'geo_roja', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Agravante', d: 'banda', t: 'Domicilio en estado de banda roja, sin PEP activo, inactivo, familiar o relacionado', c: function(p){ return p.banda === 'roja' && !p.pepAFR; } },
   { id: 'geo_ext', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Agravante', d: 'ext', t: 'Extranjero de un país sin listas', c: function(p){ return p.ext; } },
+  { id: 'geo_rel_csnu', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', d: 'relCsnu', t: 'Persona relacionada de un país con sanciones del Consejo de Seguridad', c: function(p){ return p.relCsnu; } },
   { id: 'geo_rel', g: 'geo', ops: R_AMB, tipos: R_C3, def: 'Alto', n: 'Alto por el artículo 23 Bis 4', d: 'rel', t: 'Persona relacionada de un país en la lista gris del GAFI o con régimen fiscal preferente', c: function(p){ return p.relGeo; } },
 
   { id: 'act', g: 'est', ops: R_AMB, tipos: ['PF', 'PM'], def: 'Medio', t: 'Actividad económica de alto riesgo', n: 'Según el catálogo de actividades de alto riesgo', c: function(p){ return p.act; } },
@@ -7721,7 +7722,7 @@ var ELEMENTOS_RIESGO = { a: 'Actos u operaciones', b: 'Tipo de clientes', c: 'Pa
 var DELITOS_RIESGO = { LD: 'Lavado (art. 400 Bis)', FT: 'Financiamiento al terrorismo (art. 139 Quater)' };
 var ETIQUETAS_REGLA = {
   pep_afr: ['b', 'LD'], pep_iv: ['b', 'LD'], pep_roja: ['b', 'LD'], pep_inter: ['b', 'LD'], pep_db: ['b', 'LD'], pep_ext: ['b', 'LD'],
-  geo_csnu: ['c', 'LD,FT'], geo_cm: ['c', 'LD,FT'], geo_vig: ['c', 'LD,FT'], geo_fiscal: ['c', 'LD'], geo_roja: ['c', 'LD'], geo_ext: ['c', 'LD'], geo_rel: ['c', 'LD,FT'],
+  geo_csnu: ['c', 'LD,FT'], geo_cm: ['c', 'LD,FT'], geo_vig: ['c', 'LD,FT'], geo_fiscal: ['c', 'LD'], geo_roja: ['c', 'LD'], geo_ext: ['c', 'LD'], geo_rel_csnu: ['c', 'LD,FT'], geo_rel: ['c', 'LD,FT'],
   act: ['b', 'LD'], db: ['b', 'LD'], osfl: ['b', 'FT'], pm_joven: ['b', 'LD'], fid_joven: ['b', 'LD'], edad: ['b', 'LD'],
   c_pm_db: ['b', 'LD'],
   cv_ef_menor: ['a', 'LD,FT'], cv_ef_mitad: ['a', 'LD,FT'], arr_ef_ocas: ['a', 'LD,FT'], arr_ef_hab: ['a', 'LD,FT'],
@@ -7889,12 +7890,18 @@ function perfilRiesgo(d) {
   });
   p.csnu = hit.csnu.length > 0; p.vig = hit.vig.length > 0; p.fiscal = hit.fiscal.length > 0; p.ext = hit.ext.length > 0;
   p.det.csnu = hit.csnu.join('; '); p.det.vig = hit.vig.join('; '); p.det.fiscal = hit.fiscal.join('; '); p.det.ext = hit.ext.join('; ');
-  var rel = (p.tipo === 'SIMP') ? [] : paisesDePartes(d).filter(function(v){
+  var partes = (p.tipo === 'SIMP') ? [] : paisesDePartes(d);
+  var txtParte = function(v){ return v.parte + ', ' + v.campo + ', ' + v.pais; };
+  var rel = partes.filter(function(v){
     var cats = jurisdiccionesDe(v.pais);
     return cats.indexOf('gafi_vigilancia') >= 0 || cats.indexOf('regimen_fiscal') >= 0;
   });
   p.relGeo = rel.length > 0;
-  p.det.rel = rel.map(function(v){ return v.parte + ', ' + v.campo + ', ' + v.pais; }).join('; ');
+  p.det.rel = rel.map(txtParte).join('; ');
+  // Persona relacionada de un pais con sanciones del Consejo de Seguridad.
+  var relCsnu = partes.filter(function(v){ return jurisdiccionesDe(v.pais).indexOf('csnu_sanciones') >= 0; });
+  p.relCsnu = relCsnu.length > 0;
+  p.det.relCsnu = relCsnu.map(txtParte).join('; ');
   // Contramedidas del GAFI: las mismas personas relacionadas que bloquean el alta.
   if (p.tipo !== 'SIMP') vinculosProhibidosPartes(d).forEach(function(v){ hit.cm.push(v.parte + ', ' + v.campo + ', ' + v.pais); });
   p.cm = hit.cm.length > 0;
