@@ -6639,7 +6639,9 @@ function blogEliminar(id){
 // operaciones de la ventana: efectivo, volumen, frecuencia y moneda. El origen
 // de los recursos y las contrapartes siguen como se declararon, porque las
 // operaciones no los registran. Un cliente sin operaciones en la ventana
-// conserva su perfil declarado. Donde lo observado no coincide con lo
+// conserva su perfil declarado; en arrendamiento, si tenia contrato vigente y
+// pagos periodicos declarados, la falta de pagos es una desviacion (ver
+// desviacionSinPagosReval). Donde lo observado no coincide con lo
 // declarado se anota una desviacion, y al cerrar la revaloracion del cliente
 // se levanta una alerta.
 //
@@ -6814,9 +6816,37 @@ function aplicarObservadoReval(c, ob) {
   return { datos: d, desv: desv, campos: campos };
 }
 
-function evaluarReval(c, ops) {
+// Arrendamiento sin ningun pago en la ventana. Es desviacion cuando el cliente
+// esta activo, declaro pagos mensuales, trimestrales o semestrales y algun
+// contrato estuvo vigente dentro de la ventana al menos un periodo completo de
+// esa frecuencia. El pago anual puede caer fuera de los seis meses, y en
+// compraventa no hay pagos periodicos que esperar.
+function desviacionSinPagosReval(c, ob, ventana) {
+  if (ob.n || !ventana || c.es_arrendamiento !== 'SI' || (c.estatus || 'Activo') !== 'Activo') return '';
+  var mesesPeriodo = { MENSUAL: 1, TRIMESTRAL: 3, SEMESTRAL: 6 }[c.ptx_arr_frec];
+  if (!mesesPeriodo) return '';
+  var aFecha = function(v){ var f = fechaXML(v); return f ? new Date(+f.substring(0, 4), +f.substring(4, 6) - 1, +f.substring(6, 8)) : null; };
+  var diaSig = function(x){ return new Date(x.getFullYear(), x.getMonth(), x.getDate() + 1); };
+  var desde = aFecha(ventana.desde), hasta = aFecha(ventana.hasta);
+  if (!desde || !hasta) return '';
+  var vigente = contratosDe(c).some(function(k){
+    var ini = aFecha(k.inicio) || aFecha(c.fecha_alta) || desde, ter = aFecha(k.termino);
+    if (ini < desde) ini = desde;
+    var tope = diaSig((ter && ter < hasta) ? ter : hasta);
+    return new Date(ini.getFullYear(), ini.getMonth() + mesesPeriodo, ini.getDate()) <= tope;
+  });
+  return vigente
+    ? 'Sin pagos del ' + fechaLargaReval(ventana.desde) + ' al ' + fechaLargaReval(ventana.hasta) + ' con contrato vigente; declaro frecuencia '
+      + ptxEtiqueta(PTX_FREC, c.ptx_arr_frec).toLowerCase()
+    : '';
+}
+
+// ventana: { desde, hasta } del ciclo. Sin ella no se evalua la falta de pagos.
+function evaluarReval(c, ops, ventana) {
   var ob = observadoReval(ops);
   var ap = aplicarObservadoReval(c, ob);
+  var sinPagos = desviacionSinPagosReval(c, ob, ventana);
+  if (sinPagos) ap.desv.push(sinPagos);
   // Las dos reglas de revaloracion solo pueden cumplirse aqui: desviaciones
   // contra lo declarado y efectivo observado sin haberlo declarado.
   var sinEfDecl = c.es_arrendamiento === 'SI'
@@ -6847,8 +6877,11 @@ function evaluarReval(c, ops) {
   var cambio = ia < 0 ? 'nuevo' : in_ > ia ? 'sube' : in_ < ia ? 'baja' : 'igual';
   // obs: lo observado que sostuvo este nivel. Se guarda en el expediente para
   // que una edicion posterior recalcule con lo mismo (ver conObservadoReval).
-  return { c: c, ob: ob, desv: ap.desv, res: r, anterior: ant, cambio: cambio, fuente: ob.n ? 'observado' : 'declarado', registro: null,
-           obs: (ob.n && ap.campos) ? { campos: ap.campos, marcas: marcas } : null };
+  // Sin pagos y con desviacion por eso, se guarda solo la marca: el perfil
+  // sigue siendo el declarado.
+  var obs = (ob.n && ap.campos) ? { campos: ap.campos, marcas: marcas }
+          : sinPagos ? { campos: {}, marcas: marcas, sin_pagos: true } : null;
+  return { c: c, ob: ob, desv: ap.desv, res: r, anterior: ant, cambio: cambio, fuente: ob.n ? 'observado' : 'declarado', registro: null, obs: obs };
 }
 
 // Aviso del panel principal: el ciclo en curso tiene clientes sin revalorar.
@@ -6888,7 +6921,7 @@ function pgRevaluacion(clave) {
     if (--pend > 0) return;
     var nListas = listasScrActivas();
     var evals = clientesDelCiclo(cic, D.cli).map(function(c){
-      var ev = evaluarReval(c, opsDelClienteReval(c, D.ops, cic.desde, cic.hasta));
+      var ev = evaluarReval(c, opsDelClienteReval(c, D.ops, cic.desde, cic.hasta), cic);
       // Screening del expediente (cliente y personas relacionadas) con las listas vigentes.
       ev.scr = nListas ? (scrEvaluarClienteCompleto(c) || []) : [];
       ev.scrListas = nListas;
@@ -7146,8 +7179,10 @@ function guardarReval(e, texto, cb) {
     asegurarPerfilOriginal(c2, c);
     if (e.operado) c2.perfil_operado_ult = Object.assign({ ciclo: cic.clave }, e.operado);
     // Lo observado que sostuvo el nivel queda con el expediente hasta la
-    // siguiente revaloracion; sin operaciones en la ventana, se limpia.
+    // siguiente revaloracion; sin operaciones en la ventana se limpia, salvo
+    // que la falta de pagos sea una desviacion (queda solo la marca).
     c2.reval_obs = e.obs ? { ciclo: cic.clave, fecha: hoy(), op: c.es_arrendamiento === 'SI' ? 'arr' : 'cv', campos: e.obs.campos, marcas: e.obs.marcas } : '';
+    if (e.obs && e.obs.sin_pagos) c2.reval_obs.sin_pagos = true;
     c2.ciclo_ult_revaluacion = cic.clave;
     c2.fecha_ult_revaluacion = hoy();
     var antesReval = JSON.parse(JSON.stringify(c));
@@ -10628,8 +10663,11 @@ function renderFicha(c) {
         ? '<div style="margin-top:8px;max-width:900px">'+htmlReglasRiesgo(c.riesgo_reglas, c.riesgo_agravantes, c.riesgo_subio, cfgReglas().umbral_agravantes)+'</div>'
         : '')
     +(obsRevalVigente(c)
-        ? '<div style="font-size:12px;color:var(--tx3);margin-top:6px;max-width:900px">El nivel toma el perfil transaccional operado en la revaloración de '
-          +capEsc(nombreCicloReval(c.reval_obs.ciclo))+', no el declarado. Vale hasta la siguiente revaloración.</div>'
+        ? '<div style="font-size:12px;color:var(--tx3);margin-top:6px;max-width:900px">'
+          +(c.reval_obs.sin_pagos
+              ? 'El nivel incluye la desviación de la revaloración de '+capEsc(nombreCicloReval(c.reval_obs.ciclo))+': no hubo pagos en la ventana con contrato vigente.'
+              : 'El nivel toma el perfil transaccional operado en la revaloración de '+capEsc(nombreCicloReval(c.reval_obs.ciclo))+', no el declarado.')
+          +' Vale hasta la siguiente revaloración.</div>'
         : '')
     +'</div>'
     +'<div style="display:flex;gap:8px">'
